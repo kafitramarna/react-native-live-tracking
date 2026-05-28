@@ -43,6 +43,12 @@ Thumbs.db
 # Testing
 coverage/
 
+# Kiro
+.kiro/
+
+# PRD
+prd.md
+
 # Misc
 *.log
 npm-debug.log*
