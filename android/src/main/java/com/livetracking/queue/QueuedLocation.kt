@@ -1,11 +1,10 @@
 package com.livetracking.queue
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-
-@Entity(tableName = "queued_locations")
+/**
+ * Data class representing a queued location entry.
+ */
 data class QueuedLocation(
-    @PrimaryKey val id: String,
+    val id: String,
     val latitude: Double,
     val longitude: Double,
     val timestamp: Long,
