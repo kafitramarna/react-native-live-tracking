@@ -15,7 +15,13 @@ import type {
 const DEFAULT_INTERVAL_MS = 10000;
 const DEFAULT_DISTANCE_FILTER_METERS = 10;
 const DEFAULT_STOP_WHEN_STILL = true;
-const DEFAULT_HISTORY_BATCH_SIZE = 15;
+
+// ─── Validation Constants ────────────────────────────────────────────────────
+
+const MAX_TARGETS = 20;
+const MAX_PATH_LENGTH = 768;
+const MAX_BATCH_SIZE = 1000;
+const VALID_METHODS = ['set', 'push', 'update'] as const;
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -62,6 +68,9 @@ export function validateConfig(config: unknown): ConfigValidationResult {
  * Applies default values to a valid TrackingConfig object.
  * Should only be called after validateConfig returns valid: true.
  *
+ * Note: Sync target defaults (batchSize, offlineQueue) are handled per-target
+ * at the native layer. Targets pass through without modification here.
+ *
  * @param config - A valid TrackingConfig object
  * @returns A new TrackingConfig with all defaults applied
  */
@@ -76,9 +85,8 @@ export function applyDefaults(config: TrackingConfig): TrackingConfig {
         config.optimization.stopWhenStill ?? DEFAULT_STOP_WHEN_STILL,
     },
     firebase: {
-      ...config.firebase,
-      historyBatchSize:
-        config.firebase.historyBatchSize ?? DEFAULT_HISTORY_BATCH_SIZE,
+      service: config.firebase.service,
+      targets: config.firebase.targets,
     },
   };
 }
@@ -179,6 +187,9 @@ function validateFirebase(firebase: unknown, errors: ConfigError[]): void {
 
   const fb = firebase as Record<string, unknown>;
 
+  // Detect deprecated fields
+  validateDeprecatedFields(fb, errors);
+
   // service (required, must be 'RTDB' or 'Firestore')
   if (fb['service'] === undefined || fb['service'] === null) {
     errors.push({
@@ -189,49 +200,223 @@ function validateFirebase(firebase: unknown, errors: ConfigError[]): void {
   } else if (fb['service'] !== 'RTDB' && fb['service'] !== 'Firestore') {
     errors.push({
       field: 'firebase.service',
-      message: "firebase.service must be 'RTDB' or 'Firestore'",
+      message: `firebase.service must be 'RTDB' or 'Firestore', got '${String(fb['service'])}'`,
       code: 'INVALID_VALUE',
     });
   }
 
-  // At least one path must be provided
-  const hasCurrentPath =
-    typeof fb['currentLocationPath'] === 'string' &&
-    (fb['currentLocationPath'] as string).trim().length > 0;
-  const hasHistoryPath =
-    typeof fb['historyPath'] === 'string' &&
-    (fb['historyPath'] as string).trim().length > 0;
+  // Validate targets array
+  validateTargets(fb['targets'], errors);
+}
 
-  if (!hasCurrentPath && !hasHistoryPath) {
+function validateDeprecatedFields(
+  fb: Record<string, unknown>,
+  errors: ConfigError[]
+): void {
+  if (fb['currentLocationPath'] !== undefined) {
     errors.push({
       field: 'firebase.currentLocationPath',
       message:
-        'At least one of firebase.currentLocationPath or firebase.historyPath must be a non-empty string',
-      code: 'REQUIRED_FIELD',
+        'currentLocationPath is deprecated. Migrate to the targets array by adding a SyncTarget with method \'set\'',
+      code: 'DEPRECATED_FIELD',
     });
   }
 
-  // historyBatchSize (optional, but if provided must be a positive integer)
+  if (fb['historyPath'] !== undefined) {
+    errors.push({
+      field: 'firebase.historyPath',
+      message:
+        'historyPath is deprecated. Migrate to the targets array by adding a SyncTarget with method \'push\'',
+      code: 'DEPRECATED_FIELD',
+    });
+  }
+
   if (fb['historyBatchSize'] !== undefined) {
-    if (
-      typeof fb['historyBatchSize'] !== 'number' ||
-      !isFinite(fb['historyBatchSize'] as number)
-    ) {
+    errors.push({
+      field: 'firebase.historyBatchSize',
+      message:
+        'historyBatchSize is deprecated. Migrate to per-target batchSize in the targets array',
+      code: 'DEPRECATED_FIELD',
+    });
+  }
+}
+
+function validateTargets(targets: unknown, errors: ConfigError[]): void {
+  if (targets === undefined || targets === null || !Array.isArray(targets)) {
+    errors.push({
+      field: 'firebase.targets',
+      message: 'firebase.targets is required and must be an array',
+      code: 'REQUIRED_FIELD',
+    });
+    return;
+  }
+
+  if (targets.length === 0) {
+    errors.push({
+      field: 'firebase.targets',
+      message: 'firebase.targets must contain at least 1 sync target',
+      code: 'INVALID_VALUE',
+    });
+    return;
+  }
+
+  if (targets.length > MAX_TARGETS) {
+    errors.push({
+      field: 'firebase.targets',
+      message: `firebase.targets must contain at most ${MAX_TARGETS} sync targets, got ${targets.length}`,
+      code: 'INVALID_VALUE',
+    });
+  }
+
+  // Validate each target
+  const seenPaths = new Set<string>();
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    const prefix = `firebase.targets[${i}]`;
+
+    if (target === null || target === undefined || typeof target !== 'object') {
       errors.push({
-        field: 'firebase.historyBatchSize',
-        message: 'historyBatchSize must be a finite number',
+        field: prefix,
+        message: `${prefix} must be an object`,
         code: 'INVALID_TYPE',
       });
-    } else if (
-      (fb['historyBatchSize'] as number) <= 0 ||
-      !Number.isInteger(fb['historyBatchSize'] as number)
-    ) {
-      errors.push({
-        field: 'firebase.historyBatchSize',
-        message: 'historyBatchSize must be a positive integer',
-        code: 'OUT_OF_RANGE',
-      });
+      continue;
     }
+
+    const t = target as Record<string, unknown>;
+
+    // Validate path
+    validateTargetPath(t['path'], i, prefix, errors, seenPaths);
+
+    // Validate method
+    validateTargetMethod(t['method'], i, prefix, errors);
+
+    // Validate batchSize (optional)
+    if (t['batchSize'] !== undefined) {
+      validateTargetBatchSize(t['batchSize'], i, prefix, errors);
+    }
+
+    // Validate offlineQueue (optional)
+    if (t['offlineQueue'] !== undefined) {
+      validateTargetOfflineQueue(t['offlineQueue'], i, prefix, errors);
+    }
+  }
+}
+
+function validateTargetPath(
+  path: unknown,
+  _index: number,
+  prefix: string,
+  errors: ConfigError[],
+  seenPaths: Set<string>
+): void {
+  if (path === undefined || path === null || typeof path !== 'string') {
+    errors.push({
+      field: `${prefix}.path`,
+      message: `${prefix}.path is required and must be a string`,
+      code: 'REQUIRED_FIELD',
+    });
+    return;
+  }
+
+  if (path.trim().length === 0) {
+    errors.push({
+      field: `${prefix}.path`,
+      message: `${prefix}.path must not be empty or whitespace-only`,
+      code: 'INVALID_VALUE',
+    });
+    return;
+  }
+
+  if (path.length > MAX_PATH_LENGTH) {
+    errors.push({
+      field: `${prefix}.path`,
+      message: `${prefix}.path must not exceed ${MAX_PATH_LENGTH} characters, got ${path.length}`,
+      code: 'INVALID_VALUE',
+    });
+    return;
+  }
+
+  // Check for duplicate paths (case-sensitive)
+  if (seenPaths.has(path)) {
+    errors.push({
+      field: `${prefix}.path`,
+      message: `${prefix}.path '${path}' is a duplicate; each target must have a unique path`,
+      code: 'DUPLICATE_VALUE',
+    });
+  } else {
+    seenPaths.add(path);
+  }
+}
+
+function validateTargetMethod(
+  method: unknown,
+  _index: number,
+  prefix: string,
+  errors: ConfigError[]
+): void {
+  if (method === undefined || method === null) {
+    errors.push({
+      field: `${prefix}.method`,
+      message: `${prefix}.method is required and must be 'set', 'push', or 'update'`,
+      code: 'REQUIRED_FIELD',
+    });
+    return;
+  }
+
+  if (
+    typeof method !== 'string' ||
+    !(VALID_METHODS as readonly string[]).includes(method)
+  ) {
+    errors.push({
+      field: `${prefix}.method`,
+      message: `${prefix}.method must be 'set', 'push', or 'update', got '${String(method)}'`,
+      code: 'INVALID_VALUE',
+    });
+  }
+}
+
+function validateTargetBatchSize(
+  batchSize: unknown,
+  _index: number,
+  prefix: string,
+  errors: ConfigError[]
+): void {
+  if (
+    typeof batchSize !== 'number' ||
+    !isFinite(batchSize) ||
+    !Number.isInteger(batchSize)
+  ) {
+    errors.push({
+      field: `${prefix}.batchSize`,
+      message: `${prefix}.batchSize must be a positive integer between 1 and ${MAX_BATCH_SIZE}`,
+      code: 'INVALID_VALUE',
+    });
+    return;
+  }
+
+  if (batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
+    errors.push({
+      field: `${prefix}.batchSize`,
+      message: `${prefix}.batchSize must be between 1 and ${MAX_BATCH_SIZE}, got ${batchSize}`,
+      code: 'OUT_OF_RANGE',
+    });
+  }
+}
+
+function validateTargetOfflineQueue(
+  offlineQueue: unknown,
+  _index: number,
+  prefix: string,
+  errors: ConfigError[]
+): void {
+  if (typeof offlineQueue !== 'boolean') {
+    errors.push({
+      field: `${prefix}.offlineQueue`,
+      message: `${prefix}.offlineQueue must be a boolean`,
+      code: 'INVALID_TYPE',
+    });
   }
 }
 
