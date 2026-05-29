@@ -48,13 +48,17 @@ class LiveTrackingModule(reactContext: ReactApplicationContext) :
         impl.getQueuedLocations(promise)
     }
 
+    override fun getQueuedLocationsByTarget(promise: Promise) {
+        impl.getQueuedLocationsByTarget(promise)
+    }
+
     @ReactMethod
-    fun addListener(eventName: String) {
+    override fun addListener(eventName: String) {
         // Required for RN event emitter - no-op
     }
 
     @ReactMethod
-    fun removeListeners(count: Int) {
+    override fun removeListeners(count: Double) {
         // Required for RN event emitter - no-op
     }
 }

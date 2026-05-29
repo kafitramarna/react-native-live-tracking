@@ -15,8 +15,9 @@ import com.livetracking.permissions.PermissionResult
 import com.livetracking.queue.QueueEngine
 import com.livetracking.receiver.TrackingStateStore
 import com.livetracking.service.TrackingForegroundService
-import com.livetracking.sync.FirebaseSyncEngine
-import com.livetracking.sync.SyncCallback
+import com.livetracking.sync.LocationDataPoint
+import com.livetracking.sync.SyncEngineController
+import com.livetracking.sync.TargetEventListener
 import org.json.JSONObject
 
 /**
@@ -25,15 +26,15 @@ import org.json.JSONObject
  *
  * Wires all engines together:
  * - LocationEngine: GPS location updates via FusedLocationProvider
- * - QueueEngine: Offline queue (Room database)
- * - FirebaseSyncEngine: Firebase writes (RTDB or Firestore)
+ * - QueueEngine: Offline queue (Room database) with per-target support
+ * - SyncEngineController: Multi-target Firebase writes (RTDB or Firestore)
  * - NetworkListener: Connectivity monitoring
  * - ActivityRecognitionHandler: Activity detection
  * - MotionSleepManager: Battery optimization via motion sleep
  * - PermissionHandler: Permission checks
  * - TrackingForegroundService: Foreground service for background tracking
  *
- * Requirements: 9.1, 9.2, 9.3, 9.4, 11.2
+ * Requirements: 3.1, 3.5, 4.4, 9.2, 9.4, 10.1, 10.2, 10.3, 10.4
  */
 class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) {
 
@@ -48,7 +49,6 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
         private const val DEFAULT_INTERVAL_MS = 10000L
         private const val DEFAULT_DISTANCE_FILTER_METERS = 10f
         private const val DEFAULT_STOP_WHEN_STILL = true
-        private const val DEFAULT_HISTORY_BATCH_SIZE = 15
 
         // Tracking states
         private const val STATE_IDLE = "idle"
@@ -60,7 +60,7 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     // Engines
     private var locationEngine: LocationEngine? = null
     private var queueEngine: QueueEngine? = null
-    private var syncEngine: FirebaseSyncEngine? = null
+    private var syncEngineController: SyncEngineController? = null
     private var networkListener: NetworkListener? = null
     private var activityRecognitionHandler: ActivityRecognitionHandler? = null
     private var motionSleepManager: MotionSleepManager? = null
@@ -70,10 +70,7 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     private var intervalMs: Long = DEFAULT_INTERVAL_MS
     private var distanceFilterMeters: Float = DEFAULT_DISTANCE_FILTER_METERS
     private var stopWhenStill: Boolean = DEFAULT_STOP_WHEN_STILL
-    private var historyBatchSize: Int = DEFAULT_HISTORY_BATCH_SIZE
     private var firebaseService: String? = null
-    private var currentLocationPath: String? = null
-    private var historyPath: String? = null
     private var notificationTitle: String = "Live Tracking"
     private var notificationText: String = "Tracking your location"
     private var notificationIcon: String? = null
@@ -88,6 +85,9 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     /**
      * Parse JSON config string and create all engines with config values.
      * Validates required fields and applies defaults for optional ones.
+     *
+     * Parses the `firebase.targets` array and instantiates a SyncEngineController
+     * with one TargetHandler per configured sync target.
      *
      * @param config JSON string containing TrackingConfig
      * @param promise Promise to resolve/reject
@@ -127,14 +127,14 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
                 return
             }
 
-            currentLocationPath = firebase.optString("currentLocationPath", "").ifEmpty { null }
-            historyPath = firebase.optString("historyPath", "").ifEmpty { null }
-            historyBatchSize = firebase.optInt("historyBatchSize", DEFAULT_HISTORY_BATCH_SIZE)
-
-            if (currentLocationPath == null && historyPath == null) {
-                promise.reject("INVALID_CONFIG", "At least one of firebase.currentLocationPath or firebase.historyPath must be configured")
+            // Parse targets array from firebase config
+            val targetsArray = firebase.optJSONArray("targets")
+            if (targetsArray == null || targetsArray.length() == 0) {
+                promise.reject("INVALID_CONFIG", "firebase.targets array is required and must contain at least one sync target")
                 return
             }
+
+            val targetsJson = targetsArray.toString()
 
             // Parse Android notification config
             val androidNotification = json.optJSONObject("androidNotification")
@@ -146,11 +146,14 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
                 notificationChannelName = androidNotification.optString("channelName", TrackingForegroundService.DEFAULT_CHANNEL_NAME)
             }
 
-            // Initialize engines
-            initializeEngines()
+            // Initialize engines (including SyncEngineController with targets)
+            initializeEngines(targetsJson)
 
             trackingState = STATE_CONFIGURED
             promise.resolve(null)
+        } catch (e: IllegalArgumentException) {
+            // SyncEngineController throws IllegalArgumentException for invalid targets JSON
+            promise.reject("INVALID_CONFIG", "Failed to parse targets configuration: ${e.message}")
         } catch (e: Exception) {
             promise.reject("INVALID_CONFIG", "Failed to parse configuration: ${e.message}")
         }
@@ -223,11 +226,15 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
 
     /**
      * Stop all engines, stop foreground service, save tracking state as inactive.
+     * Flushes all partially-filled batches via SyncEngineController before stopping.
      *
      * @param promise Promise to resolve/reject
      */
     fun stop(promise: Promise) {
         try {
+            // Flush all partially-filled batches before stopping (Requirement 4.4)
+            syncEngineController?.flushAll()
+
             // Stop location engine
             locationEngine?.stopLocationUpdates()
 
@@ -265,12 +272,8 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             status.put("state", trackingState)
             status.put("isOnline", networkListener?.isOnline() ?: true)
 
-            // Get queued locations count
-            val queuedCount = try {
-                queueEngine?.count()?.get() ?: 0
-            } catch (e: Exception) {
-                0
-            }
+            // Get queued locations count from SyncEngineController (sum of all targets)
+            val queuedCount = syncEngineController?.getQueuedCounts()?.values?.sum() ?: 0
             status.put("queuedLocations", queuedCount)
 
             // Last location
@@ -304,16 +307,46 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     }
 
     /**
-     * Return the count of queued locations waiting to be synced.
+     * Return the total count of queued locations across all targets.
+     * Rejects with NOT_CONFIGURED if called before configure().
      *
      * @param promise Promise to resolve with queue count
      */
     fun getQueuedLocations(promise: Promise) {
+        if (trackingState == STATE_IDLE) {
+            promise.reject("NOT_CONFIGURED", "Call configure() before getQueuedLocations()")
+            return
+        }
         try {
-            val count = queueEngine?.count()?.get() ?: 0
+            val count = syncEngineController?.getQueuedCounts()?.values?.sum() ?: 0
             promise.resolve(count)
         } catch (e: Exception) {
             promise.resolve(0)
+        }
+    }
+
+    /**
+     * Return a JSON string mapping each configured target path to its queued location count.
+     * Targets with offlineQueue disabled report 0.
+     * Rejects with NOT_CONFIGURED if called before configure().
+     *
+     * @param promise Promise to resolve with JSON string (e.g., {"path1": 5, "path2": 0})
+     * Requirements: 10.2, 10.3, 10.4
+     */
+    fun getQueuedLocationsByTarget(promise: Promise) {
+        if (trackingState == STATE_IDLE) {
+            promise.reject("NOT_CONFIGURED", "Call configure() before getQueuedLocationsByTarget()")
+            return
+        }
+        try {
+            val counts = syncEngineController?.getQueuedCounts() ?: emptyMap()
+            val result = JSONObject()
+            for ((path, count) in counts) {
+                result.put(path, count)
+            }
+            promise.resolve(result.toString())
+        } catch (e: Exception) {
+            promise.reject("STATUS_ERROR", "Failed to get queued locations by target: ${e.message}")
         }
     }
 
@@ -321,8 +354,11 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
 
     /**
      * Initialize all engines with the current configuration.
+     *
+     * @param targetsJson JSON array string of sync target configurations
+     * @throws IllegalArgumentException if targetsJson fails to parse or contains invalid targets
      */
-    private fun initializeEngines() {
+    private fun initializeEngines(targetsJson: String) {
         // Location Engine
         locationEngine = LocationEngine(reactContext).apply {
             setLocationListener(object : LocationEngine.LocationUpdateListener {
@@ -332,15 +368,8 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             })
         }
 
-        // Queue Engine
+        // Queue Engine (provides per-target offline queue operations)
         queueEngine = QueueEngine(reactContext)
-
-        // Firebase Sync Engine
-        syncEngine = FirebaseSyncEngine(
-            service = firebaseService!!,
-            currentLocationPath = currentLocationPath,
-            historyPath = historyPath
-        )
 
         // Network Listener
         networkListener = NetworkListener(reactContext).apply {
@@ -350,10 +379,29 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
                 }
 
                 override fun onNetworkLost() {
-                    // No action needed - queue will hold data
+                    // No action needed - offline queue will hold data for targets with offlineQueue enabled
                 }
             })
         }
+
+        // SyncEngineController — replaces FirebaseSyncEngine
+        // Parses targets JSON and instantiates one TargetHandler per target.
+        // Throws IllegalArgumentException if targets JSON is invalid (Requirement 9.4)
+        syncEngineController = SyncEngineController(
+            targetsJson = targetsJson,
+            firebaseService = firebaseService!!,
+            networkChecker = { networkListener?.isOnline() ?: true },
+            offlineQueueProvider = queueEngine,
+            eventListener = object : TargetEventListener {
+                override fun onWriteError(targetPath: String, method: String, errorCode: String, message: String) {
+                    emitError(errorCode, "Target '$targetPath' ($method): $message")
+                }
+
+                override fun onQueueOverflow(targetPath: String) {
+                    emitError("QUEUE_OVERFLOW", "Offline queue overflow for target '$targetPath' — oldest data point evicted")
+                }
+            }
+        )
 
         // Activity Recognition Handler
         activityRecognitionHandler = ActivityRecognitionHandler(reactContext).apply {
@@ -390,7 +438,9 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
 
     /**
      * Handle a new location update from LocationEngine.
-     * Applies distance/time filter, emits event to JS, enqueues for history, syncs current location.
+     * Applies distance/time filter, emits event to JS, dispatches to all sync targets.
+     *
+     * Requirement 3.1: Dispatches to all configured sync targets in parallel via SyncEngineController.
      */
     private fun handleLocationUpdate(location: Location) {
         // Apply distance/time filter
@@ -405,26 +455,17 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
         // Emit location event to JavaScript
         emitLocationUpdate(location)
 
-        // Enqueue for history (if historyPath configured)
-        if (historyPath != null) {
-            queueEngine?.enqueue(
-                latitude = location.latitude,
-                longitude = location.longitude,
-                timestamp = location.time,
-                accuracy = location.accuracy,
-                speed = if (location.hasSpeed()) location.speed else null,
-                altitude = if (location.hasAltitude()) location.altitude else null,
-                bearing = if (location.hasBearing()) location.bearing else null
-            )
-
-            // Check if batch size reached, trigger sync
-            checkAndFlushBatch()
-        }
-
-        // Sync current location to Firebase (if currentLocationPath configured)
-        if (currentLocationPath != null) {
-            syncCurrentLocation(location)
-        }
+        // Dispatch to all configured sync targets via SyncEngineController
+        val dataPoint = LocationDataPoint(
+            latitude = location.latitude,
+            longitude = location.longitude,
+            timestamp = location.time,
+            accuracy = location.accuracy,
+            speed = if (location.hasSpeed()) location.speed else null,
+            altitude = if (location.hasAltitude()) location.altitude else null,
+            bearing = if (location.hasBearing()) location.bearing else null
+        )
+        syncEngineController?.dispatchLocation(dataPoint)
     }
 
     /**
@@ -495,72 +536,11 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     }
 
     /**
-     * Sync current location to Firebase (overwrite at currentLocationPath).
-     */
-    private fun syncCurrentLocation(location: Location) {
-        syncEngine?.updateCurrentLocation(
-            latitude = location.latitude,
-            longitude = location.longitude,
-            timestamp = location.time,
-            accuracy = location.accuracy,
-            speed = if (location.hasSpeed()) location.speed else null,
-            callback = object : SyncCallback {
-                override fun onSuccess() {
-                    // Successfully synced current location
-                }
-
-                override fun onError(errorCode: String, message: String) {
-                    emitError(errorCode, message)
-                }
-            }
-        )
-    }
-
-    /**
-     * Check if batch size is reached and flush queue to Firebase history.
-     */
-    private fun checkAndFlushBatch() {
-        try {
-            val count = queueEngine?.count()?.get() ?: 0
-            if (count >= historyBatchSize && networkListener?.isOnline() != false) {
-                flushQueueBatch()
-            }
-        } catch (e: Exception) {
-            // Queue count failed, skip batch check
-        }
-    }
-
-    /**
-     * Flush a batch of queued locations to Firebase history path.
-     */
-    private fun flushQueueBatch() {
-        try {
-            val batch = queueEngine?.dequeueBatch(historyBatchSize)?.get() ?: return
-            if (batch.isEmpty()) return
-
-            syncEngine?.pushHistoryBatch(batch, object : SyncCallback {
-                override fun onSuccess() {
-                    // Remove successfully sent batch from queue
-                    val ids = batch.map { it.id }
-                    queueEngine?.removeBatch(ids)
-                }
-
-                override fun onError(errorCode: String, message: String) {
-                    // Batch remains in queue for retry
-                    emitError(errorCode, message)
-                }
-            })
-        } catch (e: Exception) {
-            // Queue operation failed, will retry on next opportunity
-        }
-    }
-
-    /**
-     * Handle network restored: flush pending queue.
+     * Handle network restored: flush offline queues for all targets with offlineQueue enabled.
      */
     private fun handleNetworkRestored() {
         if (trackingState == STATE_TRACKING || trackingState == STATE_MOTION_SLEEP) {
-            flushQueueBatch()
+            syncEngineController?.flushOfflineQueues()
         }
     }
 

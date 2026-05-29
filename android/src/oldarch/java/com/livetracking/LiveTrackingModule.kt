@@ -54,6 +54,11 @@ class LiveTrackingModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun getQueuedLocationsByTarget(promise: Promise) {
+        impl.getQueuedLocationsByTarget(promise)
+    }
+
+    @ReactMethod
     fun addListener(eventName: String) {
         // Required for RN event emitter - no-op
     }
