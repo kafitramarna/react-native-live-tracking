@@ -23,6 +23,8 @@ protocol NetworkStateDelegate: AnyObject {
  * When connectivity is restored after being offline, it notifies the registered delegate
  * so that pending queued locations can be flushed to Firebase.
  *
+ * Conforms to NetworkStatusProvider for use with SyncEngineController.
+ *
  * Requirements: 6.2, 6.4
  *
  * Usage:
@@ -34,7 +36,7 @@ protocol NetworkStateDelegate: AnyObject {
  * listener.stopListening()
  * ```
  */
-class NetworkListener {
+class NetworkListener: NetworkStatusProvider {
 
     // MARK: - Properties
 

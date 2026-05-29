@@ -8,8 +8,8 @@ import CoreLocation
  *
  * Wires together all engines:
  * - LocationEngine: CLLocationManager wrapper for GPS updates
- * - QueueEngine: CoreData offline queue for history
- * - FirebaseSyncEngine: Firebase writes (RTDB/Firestore)
+ * - SyncEngineController: Multi-target Firebase sync with per-target batching, retry, and offline queue
+ * - OfflineQueueManager: CoreData offline queue for per-target persistence
  * - NetworkListener: NWPathMonitor connectivity detection
  * - ActivityRecognitionHandler: CMMotionActivityManager activity detection
  * - MotionSleepManager: Sleep mode for battery optimization
@@ -17,7 +17,7 @@ import CoreLocation
  * - BackgroundModeHelper: Significant location monitoring
  * - TrackingCleanup: Stop/cleanup utility
  *
- * Requirements: 9.1, 9.2, 9.3, 9.4, 11.2
+ * Requirements: 3.1, 4.4, 9.3, 9.4, 10.1, 10.2, 10.3, 10.4
  */
 @objc(LiveTracking)
 class LiveTracking: RCTEventEmitter {
@@ -26,6 +26,7 @@ class LiveTracking: RCTEventEmitter {
 
     private static let EVENT_LOCATION_UPDATE = "onLocationUpdate"
     private static let EVENT_TRACKING_ERROR = "onTrackingError"
+    private static let EVENT_QUEUE_OVERFLOW = "onQueueOverflow"
 
     // MARK: - State
 
@@ -42,8 +43,8 @@ class LiveTracking: RCTEventEmitter {
     // MARK: - Engines
 
     private var locationEngine: LocationEngine?
-    private var queueEngine: QueueEngine?
-    private var syncEngine: FirebaseSyncEngine?
+    private var syncEngineController: SyncEngineController?
+    private var offlineQueueManager: OfflineQueueManager?
     private var networkListener: NetworkListener?
     private var activityRecognitionHandler: ActivityRecognitionHandler?
     private var motionSleepManager: MotionSleepManager?
@@ -55,10 +56,6 @@ class LiveTracking: RCTEventEmitter {
     private var intervalMs: Int = 10000
     private var distanceFilterMeters: Double = 10.0
     private var stopWhenStill: Bool = true
-    private var historyBatchSize: Int = 15
-    private var currentLocationPath: String?
-    private var historyPath: String?
-    private var firebaseService: String = "RTDB"
 
     // MARK: - Tracking State
 
@@ -75,7 +72,8 @@ class LiveTracking: RCTEventEmitter {
     override func supportedEvents() -> [String]! {
         return [
             LiveTracking.EVENT_LOCATION_UPDATE,
-            LiveTracking.EVENT_TRACKING_ERROR
+            LiveTracking.EVENT_TRACKING_ERROR,
+            LiveTracking.EVENT_QUEUE_OVERFLOW
         ]
     }
 
@@ -91,13 +89,15 @@ class LiveTracking: RCTEventEmitter {
 
     /**
      * Configure the tracking module with a JSON config string.
-     * Parses the config and initializes all engines.
+     * Parses the config and initializes all engines including SyncEngineController.
      *
      * Expected JSON structure:
      * {
      *   "optimization": { "intervalMs": 10000, "distanceFilterMeters": 10, "stopWhenStill": true },
-     *   "firebase": { "service": "RTDB"|"Firestore", "currentLocationPath": "...", "historyPath": "...", "historyBatchSize": 15 }
+     *   "firebase": { "service": "RTDB"|"Firestore", "targets": [...] }
      * }
+     *
+     * Requirements: 9.3, 9.4
      */
     @objc
     func configure(_ config: String, resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
@@ -123,11 +123,9 @@ class LiveTracking: RCTEventEmitter {
             return
         }
 
-        let currentPath = firebaseConfig["currentLocationPath"] as? String
-        let histPath = firebaseConfig["historyPath"] as? String
-
-        if currentPath == nil && histPath == nil {
-            reject("INVALID_CONFIG", "At least one of firebase.currentLocationPath or firebase.historyPath must be configured", nil)
+        // Validate targets array exists
+        guard firebaseConfig["targets"] is [[String: Any]] else {
+            reject("INVALID_CONFIG", "Missing or invalid 'targets' array in firebase configuration", nil)
             return
         }
 
@@ -139,7 +137,6 @@ class LiveTracking: RCTEventEmitter {
             ?? (optimizationConfig?["distanceFilterMeters"] as? Int).map { Double($0) }
             ?? 10.0
         let parsedStopWhenStill = optimizationConfig?["stopWhenStill"] as? Bool ?? true
-        let parsedBatchSize = firebaseConfig["historyBatchSize"] as? Int ?? 15
 
         // Validate values
         if parsedIntervalMs < 0 {
@@ -152,28 +149,45 @@ class LiveTracking: RCTEventEmitter {
         }
 
         // Store configuration
-        self.firebaseService = service
-        self.currentLocationPath = currentPath
-        self.historyPath = histPath
         self.intervalMs = parsedIntervalMs
         self.distanceFilterMeters = parsedDistanceFilter
         self.stopWhenStill = parsedStopWhenStill
-        self.historyBatchSize = parsedBatchSize
 
-        // Initialize engines
-        self.locationEngine = LocationEngine()
-        self.locationEngine?.delegate = self
-
-        self.queueEngine = QueueEngine()
-
-        self.syncEngine = FirebaseSyncEngine(
-            service: service,
-            currentLocationPath: currentPath,
-            historyPath: histPath
-        )
-
+        // Initialize network listener first (needed by SyncEngineController)
         self.networkListener = NetworkListener()
         self.networkListener?.delegate = self
+
+        // Initialize offline queue manager
+        self.offlineQueueManager = OfflineQueueManager()
+
+        // Serialize the firebase config back to JSON for SyncEngineController
+        guard let firebaseJsonData = try? JSONSerialization.data(withJSONObject: firebaseConfig, options: []),
+              let firebaseJsonString = String(data: firebaseJsonData, encoding: .utf8) else {
+            reject("INVALID_CONFIG", "Failed to serialize firebase configuration", nil)
+            return
+        }
+
+        // Initialize SyncEngineController with targets JSON
+        // Requirement 9.3: Deserialize JSON targets array and instantiate one write handler per SyncTarget
+        // Requirement 9.4: Reject with INVALID_CONFIG if targets JSON fails to parse
+        do {
+            self.syncEngineController = try SyncEngineController(
+                jsonString: firebaseJsonString,
+                networkStatus: self.networkListener!,
+                queueManager: self.offlineQueueManager!
+            )
+            self.syncEngineController?.delegate = self
+        } catch let error as SyncEngineError {
+            reject(error.errorCode, error.errorDescription ?? "Failed to initialize sync engine", nil)
+            return
+        } catch {
+            reject("INVALID_CONFIG", "Failed to initialize sync engine: \(error.localizedDescription)", nil)
+            return
+        }
+
+        // Initialize remaining engines
+        self.locationEngine = LocationEngine()
+        self.locationEngine?.delegate = self
 
         self.activityRecognitionHandler = ActivityRecognitionHandler()
         self.activityRecognitionHandler?.stationaryThresholdMs = MotionSleepManager.STILL_THRESHOLD_MS
@@ -251,15 +265,17 @@ class LiveTracking: RCTEventEmitter {
         // Update state
         state = .tracking
 
-        // Flush any pending queue items
-        flushQueueIfNeeded()
+        // Flush any pending offline queues
+        syncEngineController?.flushOfflineQueues()
 
         resolve(nil)
     }
 
     /**
      * Stop location tracking.
-     * Stops all engines via TrackingCleanup, resets state.
+     * Flushes all partial batches via SyncEngineController, then stops all engines.
+     *
+     * Requirement 4.4: Flush all partially-filled batches before stop completes.
      */
     @objc
     func stop(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
@@ -269,31 +285,39 @@ class LiveTracking: RCTEventEmitter {
             return
         }
 
-        // Stop location engine and significant location monitoring
-        if let locationEngine = self.locationEngine {
-            let clManager = CLLocationManager()
-            trackingCleanup?.stopAllTracking(
-                locationEngine: locationEngine,
-                backgroundHelper: BackgroundModeHelper.shared,
-                locationManager: clManager
-            )
+        // Flush all partial batches before stopping (Requirement 4.4)
+        syncEngineController?.flushAll { [weak self] in
+            guard let self = self else {
+                resolve(nil)
+                return
+            }
+
+            // Stop location engine and significant location monitoring
+            if let locationEngine = self.locationEngine {
+                let clManager = CLLocationManager()
+                self.trackingCleanup?.stopAllTracking(
+                    locationEngine: locationEngine,
+                    backgroundHelper: BackgroundModeHelper.shared,
+                    locationManager: clManager
+                )
+            }
+
+            // Stop activity recognition
+            self.activityRecognitionHandler?.stopActivityRecognition()
+
+            // Stop network listener
+            self.networkListener?.stopListening()
+
+            // Cleanup
+            self.trackingCleanup?.cleanup()
+
+            // Reset state
+            self.lastLocation = nil
+            self.lastUpdateTime = nil
+            self.state = .configured
+
+            resolve(nil)
         }
-
-        // Stop activity recognition
-        activityRecognitionHandler?.stopActivityRecognition()
-
-        // Stop network listener
-        networkListener?.stopListening()
-
-        // Cleanup
-        trackingCleanup?.cleanup()
-
-        // Reset state
-        lastLocation = nil
-        lastUpdateTime = nil
-        state = .configured
-
-        resolve(nil)
     }
 
     /**
@@ -302,10 +326,12 @@ class LiveTracking: RCTEventEmitter {
      */
     @objc
     func getStatus(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        let totalQueued = syncEngineController?.getTotalQueuedCount() ?? 0
+
         var status: [String: Any] = [
             "state": state.rawValue,
             "isOnline": networkListener?.isOnline() ?? false,
-            "queuedLocations": queueEngine?.count() ?? 0
+            "queuedLocations": totalQueued
         ]
 
         // Battery optimization mode
@@ -344,12 +370,47 @@ class LiveTracking: RCTEventEmitter {
     }
 
     /**
-     * Get the number of queued locations waiting to be synced.
+     * Get the total number of queued locations waiting to be synced across all targets.
+     *
+     * Requirement 10.1: Total count across all targets.
+     * Requirement 10.4: Reject with NOT_CONFIGURED if called before configure().
      */
     @objc
     func getQueuedLocations(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        let count = queueEngine?.count() ?? 0
+        guard state != .idle, syncEngineController != nil else {
+            reject("NOT_CONFIGURED", "Library must be configured before querying queue status. Call configure() first.", nil)
+            return
+        }
+
+        let count = syncEngineController?.getTotalQueuedCount() ?? 0
         resolve(count)
+    }
+
+    /**
+     * Get the queued location counts per target path as a JSON string.
+     * Returns a record mapping each configured target path to its queued location count.
+     * Targets with offlineQueue disabled report 0.
+     *
+     * Requirement 10.2: Per-target queue counts.
+     * Requirement 10.3: Non-queuing targets report 0.
+     * Requirement 10.4: Reject with NOT_CONFIGURED if called before configure().
+     */
+    @objc
+    func getQueuedLocationsByTarget(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        guard state != .idle, let controller = syncEngineController else {
+            reject("NOT_CONFIGURED", "Library must be configured before querying queue status. Call configure() first.", nil)
+            return
+        }
+
+        let counts = controller.getQueuedCounts()
+
+        // Serialize to JSON string for bridge transport
+        if let jsonData = try? JSONSerialization.data(withJSONObject: counts, options: []),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            resolve(jsonString)
+        } else {
+            resolve("{}")
+        }
     }
 
     // MARK: - Private Methods
@@ -382,9 +443,9 @@ class LiveTracking: RCTEventEmitter {
     /**
      * Process a valid location update:
      * 1. Emit event to JS
-     * 2. Enqueue for history (if historyPath configured)
-     * 3. Sync current location to Firebase (if currentLocationPath configured)
-     * 4. Check if batch should be flushed
+     * 2. Dispatch to all sync targets via SyncEngineController
+     *
+     * Requirement 3.1: Dispatch to all configured targets in parallel.
      */
     private func processLocationUpdate(_ location: CLLocation) {
         // Update last known location and time
@@ -404,73 +465,18 @@ class LiveTracking: RCTEventEmitter {
         // 1. Emit event to JavaScript
         emitLocationEvent(locationData)
 
-        // 2. Enqueue for history if historyPath is configured
-        if historyPath != nil {
-            queueEngine?.enqueue(
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                timestamp: Int64(location.timestamp.timeIntervalSince1970 * 1000),
-                accuracy: location.horizontalAccuracy,
-                speed: location.speed >= 0 ? location.speed : 0,
-                altitude: location.altitude,
-                bearing: location.course >= 0 ? location.course : 0
-            )
+        // 2. Dispatch to all sync targets via SyncEngineController
+        let dataPoint = LocationDataPoint(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            timestamp: Int64(location.timestamp.timeIntervalSince1970 * 1000),
+            accuracy: location.horizontalAccuracy,
+            speed: location.speed >= 0 ? location.speed : nil,
+            altitude: location.altitude,
+            bearing: location.course >= 0 ? location.course : nil
+        )
 
-            // Check if batch should be flushed
-            flushQueueIfNeeded()
-        }
-
-        // 3. Sync current location to Firebase if currentLocationPath is configured
-        if currentLocationPath != nil {
-            syncEngine?.updateCurrentLocation(
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                timestamp: Int64(location.timestamp.timeIntervalSince1970 * 1000),
-                accuracy: location.horizontalAccuracy,
-                speed: location.speed >= 0 ? location.speed : nil,
-                callback: self
-            )
-        }
-    }
-
-    /**
-     * Flush the queue if batch size is reached and device is online.
-     */
-    private func flushQueueIfNeeded() {
-        guard let queueEngine = self.queueEngine,
-              let syncEngine = self.syncEngine,
-              historyPath != nil else { return }
-
-        let isOnline = networkListener?.isOnline() ?? false
-        guard isOnline else { return }
-
-        let queueCount = queueEngine.count()
-        if queueCount >= historyBatchSize {
-            let batch = queueEngine.dequeueBatch(size: historyBatchSize)
-            if !batch.isEmpty {
-                let ids = batch.compactMap { $0["id"] as? String }
-                let locations = batch.map { item -> [String: Any] in
-                    var loc: [String: Any] = [
-                        "latitude": item["latitude"] ?? 0,
-                        "longitude": item["longitude"] ?? 0,
-                        "timestamp": item["timestamp"] ?? 0,
-                        "accuracy": item["accuracy"] ?? 0,
-                        "speed": item["speed"] ?? 0,
-                        "altitude": item["altitude"] ?? 0,
-                        "bearing": item["bearing"] ?? 0
-                    ]
-                    return loc
-                }
-
-                syncEngine.pushHistoryBatch(locations: locations, callback: QueueSyncCallback(
-                    queueEngine: queueEngine,
-                    ids: ids,
-                    onError: { [weak self] errorCode, message in
-                        self?.emitErrorEvent(errorCode: errorCode, message: message)
-                    }
-                ))
-            }
-        }
+        syncEngineController?.dispatchLocation(dataPoint)
     }
 
     /**
@@ -484,11 +490,30 @@ class LiveTracking: RCTEventEmitter {
     /**
      * Emit a tracking error event to JavaScript.
      */
-    private func emitErrorEvent(errorCode: String, message: String) {
+    private func emitErrorEvent(errorCode: String, message: String, targetPath: String? = nil, method: String? = nil) {
         guard hasListeners else { return }
-        sendEvent(withName: LiveTracking.EVENT_TRACKING_ERROR, body: [
+        var body: [String: Any] = [
             "code": errorCode,
             "message": message
+        ]
+        if let targetPath = targetPath {
+            body["targetPath"] = targetPath
+        }
+        if let method = method {
+            body["method"] = method
+        }
+        sendEvent(withName: LiveTracking.EVENT_TRACKING_ERROR, body: body)
+    }
+
+    /**
+     * Emit a queue overflow warning event to JavaScript.
+     */
+    private func emitQueueOverflowEvent(targetPath: String) {
+        guard hasListeners else { return }
+        sendEvent(withName: LiveTracking.EVENT_QUEUE_OVERFLOW, body: [
+            "code": "QUEUE_OVERFLOW",
+            "message": "Offline queue overflow for target: \(targetPath)",
+            "targetPath": targetPath
         ])
     }
 }
@@ -508,8 +533,8 @@ extension LiveTracking: LocationUpdateDelegate {
 
 extension LiveTracking: NetworkStateDelegate {
     func onNetworkAvailable() {
-        // Flush queue when network is restored
-        flushQueueIfNeeded()
+        // Flush offline queues when network is restored
+        syncEngineController?.flushOfflineQueues()
     }
 
     func onNetworkLost() {
@@ -543,43 +568,14 @@ extension LiveTracking: MotionSleepDelegate {
     }
 }
 
-// MARK: - SyncCallback (for current location sync)
+// MARK: - SyncEngineControllerDelegate
 
-extension LiveTracking: SyncCallback {
-    func onSuccess() {
-        // Current location synced successfully - no action needed
+extension LiveTracking: SyncEngineControllerDelegate {
+    func onSyncError(targetPath: String, method: String, errorCode: String, message: String) {
+        emitErrorEvent(errorCode: errorCode, message: message, targetPath: targetPath, method: method)
     }
 
-    func onError(errorCode: String, message: String) {
-        emitErrorEvent(errorCode: errorCode, message: message)
-    }
-}
-
-// MARK: - QueueSyncCallback (for history batch sync)
-
-/**
- * Callback handler for queue batch sync operations.
- * On success, removes the synced items from the queue.
- * On error, emits an error event (items remain in queue for retry).
- */
-private class QueueSyncCallback: SyncCallback {
-    private let queueEngine: QueueEngine
-    private let ids: [String]
-    private let onError: (String, String) -> Void
-
-    init(queueEngine: QueueEngine, ids: [String], onError: @escaping (String, String) -> Void) {
-        self.queueEngine = queueEngine
-        self.ids = ids
-        self.onError = onError
-    }
-
-    func onSuccess() {
-        // Remove successfully synced items from queue
-        queueEngine.removeBatch(ids: ids)
-    }
-
-    func onError(errorCode: String, message: String) {
-        // Items remain in queue for retry on next opportunity
-        onError(errorCode, message)
+    func onSyncQueueOverflow(targetPath: String) {
+        emitQueueOverflowEvent(targetPath: targetPath)
     }
 }
