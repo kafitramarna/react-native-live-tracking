@@ -24,11 +24,11 @@ const LiveTrackingModule: LiveTrackingNativeModule = NativeModules.LiveTracking;
 if (!LiveTrackingModule) {
   const message = Platform.select({
     ios:
-      "The package 'react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
+      "The package '@kafitra/react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
       '- You ran `pod install` in the ios directory\n' +
       '- You rebuilt the app after installing the package\n',
     default:
-      "The package 'react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
+      "The package '@kafitra/react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
       '- You rebuilt the app after installing the package\n',
   });
   throw new Error(message!);

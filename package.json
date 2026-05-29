@@ -1,5 +1,5 @@
 {
-  "name": "react-native-live-tracking",
+  "name": "@kafitra/react-native-live-tracking",
   "version": "0.1.0",
   "description": "Real-time location tracking library for React Native with Firebase synchronization",
   "main": "lib/commonjs/index",
@@ -46,16 +46,17 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/user/react-native-live-tracking.git"
+    "url": "git+https://github.com/kafitramarna/react-native-live-tracking.git"
   },
-  "author": "Developer",
+  "author": "kafitramarna",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/user/react-native-live-tracking/issues"
+    "url": "https://github.com/kafitramarna/react-native-live-tracking/issues"
   },
-  "homepage": "https://github.com/user/react-native-live-tracking#readme",
+  "homepage": "https://github.com/kafitramarna/react-native-live-tracking#readme",
   "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@react-native/eslint-config": "^0.73.0",

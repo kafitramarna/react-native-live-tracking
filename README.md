@@ -1,23 +1,23 @@
-# react-native-live-tracking
+# @kafitra/react-native-live-tracking
 
 Real-time location tracking library for React Native with Firebase synchronization. Supports background tracking, offline caching, battery optimization, and fully flexible sync targets.
 
 ## Features
 
-- 📍 **Background Location Tracking** — Android Foreground Service & iOS Background Modes
-- 🔥 **Flexible Firebase Sync** — Define unlimited sync targets with custom paths, write methods, and behavior
-- 📴 **Offline-First** — Per-target offline queue with automatic sync when connection restores
-- 🔋 **Battery Optimization** — Distance/Time matrix filter + Motion Sleep Mode
-- 🔄 **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED)
-- 📱 **Cross-Platform** — iOS 13+ & Android API 21+
-- ⚡ **New Architecture Ready** — Supports TurboModules + legacy Bridge
+- **Background Location Tracking** — Android Foreground Service & iOS Background Modes
+- **Flexible Firebase Sync** — Define unlimited sync targets with custom paths, write methods, and behavior
+- **Offline-First** — Per-target offline queue with automatic sync when connection restores
+- **Battery Optimization** — Distance/Time matrix filter + Motion Sleep Mode
+- **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED)
+- **Cross-Platform** — iOS 13+ & Android API 21+
+- **New Architecture Ready** — Supports TurboModules + legacy Bridge
 
 ## Installation
 
 ```bash
-npm install react-native-live-tracking
+npm install @kafitra/react-native-live-tracking
 # or
-yarn add react-native-live-tracking
+yarn add @kafitra/react-native-live-tracking
 ```
 
 ### iOS
@@ -28,7 +28,7 @@ cd ios && pod install
 ## Quick Start
 
 ```typescript
-import LiveTracking from 'react-native-live-tracking';
+import LiveTracking from '@kafitra/react-native-live-tracking';
 
 // 1. Configure
 await LiveTracking.configure({
@@ -235,29 +235,6 @@ Add to `Info.plist`:
 | `FIREBASE_WRITE_FAILED` | Firebase write failed after max retries |
 | `DEPRECATED_FIELD` | Using old config fields (currentLocationPath/historyPath) |
 | `QUEUE_OVERFLOW` | Offline queue reached 10,000 cap (oldest evicted) |
-
-## Migration from v1.x
-
-Jika sebelumnya menggunakan `currentLocationPath` / `historyPath`, migrate ke `targets` array:
-
-```typescript
-// ❌ Old (v1.x) — tidak lagi didukung
-firebase: {
-  service: 'RTDB',
-  currentLocationPath: `users/${userId}/current_location`,
-  historyPath: `users/${userId}/location_history`,
-  historyBatchSize: 15,
-}
-
-// ✅ New (v2.x) — gunakan targets array
-firebase: {
-  service: 'RTDB',
-  targets: [
-    { path: `users/${userId}/current_location`, method: 'set' },
-    { path: `users/${userId}/location_history`, method: 'push', batchSize: 15, offlineQueue: true },
-  ],
-}
-```
 
 ## License
 
