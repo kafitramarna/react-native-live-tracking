@@ -33,26 +33,26 @@ import LiveTracking from '@kafitra/react-native-live-tracking';
 // 1. Configure
 await LiveTracking.configure({
   optimization: {
-    intervalMs: 10000,         // Update setiap 10 detik minimum
-    distanceFilterMeters: 10,  // Hanya update jika bergerak 10+ meter
-    stopWhenStill: true,       // Hemat baterai saat diam
+    intervalMs: 10000,         // Minimum 10 seconds between updates
+    distanceFilterMeters: 10,  // Only update if moved 10+ meters
+    stopWhenStill: true,       // Save battery when stationary
   },
   androidNotification: {
-    title: "Merekam Perjalanan",
-    text: "Lokasi Anda sedang dibagikan.",
+    title: "Recording Trip",
+    text: "Your location is being shared.",
   },
   firebase: {
-    service: 'RTDB', // atau 'Firestore'
+    service: 'RTDB', // or 'Firestore'
     targets: [
       {
         path: `users/${userId}/current_location`,
-        method: 'set',  // overwrite — untuk marker real-time di peta
+        method: 'set',  // overwrite — for real-time map marker
       },
       {
         path: `users/${userId}/location_history`,
-        method: 'push',        // append — untuk rekam jejak
-        batchSize: 15,         // kirim tiap 15 titik
-        offlineQueue: true,    // simpan offline jika tidak ada koneksi
+        method: 'push',        // append — for track history
+        batchSize: 15,         // send every 15 points
+        offlineQueue: true,    // persist offline if no connection
       },
     ],
   },
@@ -73,17 +73,17 @@ subscription.remove();
 
 ## Sync Targets
 
-Setiap sync target mendefinisikan **path**, **method**, dan behavior opsional. Kamu bebas menentukan struktur database Firebase sesuka hati.
+Each sync target defines a **path**, **method**, and optional behavior. You have full control over your Firebase database structure.
 
 ```typescript
 interface SyncTarget {
-  /** Firebase path untuk ditulis */
+  /** Firebase path to write to */
   path: string;
-  /** Metode write: 'set' (overwrite), 'push' (append), 'update' (merge) */
+  /** Write method: 'set' (overwrite), 'push' (append), 'update' (merge) */
   method: 'set' | 'push' | 'update';
-  /** Jumlah titik yang diakumulasi sebelum ditulis. Default: 1 (langsung tulis) */
+  /** Number of points to accumulate before writing. Default: 1 (immediate) */
   batchSize?: number;
-  /** Apakah data disimpan offline saat tidak ada koneksi. Default: false */
+  /** Whether to persist data offline when there is no connection. Default: false */
   offlineQueue?: boolean;
 }
 ```
@@ -92,23 +92,23 @@ interface SyncTarget {
 
 | Method | Behavior | Use Case |
 |--------|----------|----------|
-| `set` | Overwrite data di path | Marker real-time di peta |
-| `push` | Append dengan auto-generated key | Rekam jejak / history |
-| `update` | Merge fields tanpa hapus field lain | Update partial data |
+| `set` | Overwrite data at path | Real-time map marker |
+| `push` | Append with auto-generated key | Track history |
+| `update` | Merge fields without removing existing ones | Partial data update |
 
-### Contoh: Banyak Target
+### Example: Multiple Targets
 
 ```typescript
 firebase: {
   service: 'Firestore',
   targets: [
-    // Real-time marker (overwrite, tanpa queue)
+    // Real-time marker (overwrite, no queue)
     { path: `drivers/${driverId}/location`, method: 'set' },
 
-    // History perjalanan (batch + offline queue)
+    // Trip history (batch + offline queue)
     { path: `trips/${tripId}/points`, method: 'push', batchSize: 20, offlineQueue: true },
 
-    // Status update (merge ke dokumen yang sudah ada)
+    // Status update (merge into existing document)
     { path: `drivers/${driverId}/status`, method: 'update' },
   ],
 }
@@ -120,64 +120,64 @@ firebase: {
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `optimization.intervalMs` | number | 10000 | Minimum interval antar update (ms) |
-| `optimization.distanceFilterMeters` | number | 10 | Minimum jarak untuk trigger update (meter) |
-| `optimization.stopWhenStill` | boolean | true | Aktifkan Motion Sleep Mode |
+| `optimization.intervalMs` | number | 10000 | Minimum interval between updates (ms) |
+| `optimization.distanceFilterMeters` | number | 10 | Minimum distance to trigger update (meters) |
+| `optimization.stopWhenStill` | boolean | true | Enable Motion Sleep Mode |
 
 ### Firebase
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `firebase.service` | `'RTDB' \| 'Firestore'` | ✅ | Tipe Firebase service |
-| `firebase.targets` | `SyncTarget[]` | ✅ | Array sync targets (min 1, max 20) |
+| `firebase.service` | `'RTDB' \| 'Firestore'` | ✅ | Firebase service type |
+| `firebase.targets` | `SyncTarget[]` | ✅ | Array of sync targets (min 1, max 20) |
 
 ### SyncTarget Options
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | string | — | Firebase path (1–768 karakter) |
-| `method` | `'set' \| 'push' \| 'update'` | — | Metode write |
-| `batchSize` | number | 1 | Jumlah titik per batch (1–1000) |
-| `offlineQueue` | boolean | false | Simpan data offline saat tidak ada koneksi |
+| `path` | string | — | Firebase path (1–768 characters) |
+| `method` | `'set' \| 'push' \| 'update'` | — | Write method |
+| `batchSize` | number | 1 | Points per batch (1–1000) |
+| `offlineQueue` | boolean | false | Persist data offline when no connection |
 
 ### Android Notification
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `androidNotification.title` | string | — | Judul notifikasi foreground service |
-| `androidNotification.text` | string | — | Teks notifikasi |
-| `androidNotification.icon` | string? | — | Nama resource icon |
+| `androidNotification.title` | string | — | Foreground service notification title |
+| `androidNotification.text` | string | — | Notification text |
+| `androidNotification.icon` | string? | — | Icon resource name |
 | `androidNotification.channelId` | string? | — | Notification channel ID |
 
 ## How It Works
 
 ### Distance/Time Matrix (AND logic)
-Location updates hanya dikirim ketika **KEDUA** kondisi terpenuhi:
-- Waktu sejak update terakhir ≥ `intervalMs`
-- Jarak dari lokasi terakhir ≥ `distanceFilterMeters`
+Location updates are only sent when **BOTH** conditions are met:
+- Time since last update ≥ `intervalMs`
+- Distance from last location ≥ `distanceFilterMeters`
 
 ### Motion Sleep Mode
-Ketika `stopWhenStill: true` dan device diam > 3 menit:
-- Akurasi GPS diturunkan untuk hemat baterai
-- Kembali ke akurasi penuh saat terdeteksi pergerakan
+When `stopWhenStill: true` and device is stationary for > 3 minutes:
+- GPS accuracy is reduced to save battery
+- Resumes full accuracy when movement is detected
 
 ### Per-Target Batch Processing
-- Target dengan `batchSize > 1` mengakumulasi titik di memori
-- Ditulis ke Firebase dalam satu operasi batch saat penuh
-- Partial batch otomatis di-flush saat `stop()` dipanggil atau setelah 30 detik tidak ada update baru
+- Targets with `batchSize > 1` accumulate points in memory
+- Written to Firebase in a single batch operation when full
+- Partial batches are automatically flushed on `stop()` or after 30 seconds of inactivity
 
 ### Per-Target Offline Queue
-- Target dengan `offlineQueue: true` menyimpan data ke SQLite (Android) / CoreData (iOS) saat offline
-- Otomatis sync saat koneksi kembali (chronological order, oldest first)
-- Maksimum 10.000 data point per target (oldest evicted saat penuh)
-- Data persist across app restart dan process termination
+- Targets with `offlineQueue: true` persist data to SQLite (Android) / CoreData (iOS) when offline
+- Automatically synced when connection restores (chronological order, oldest first)
+- Maximum 10,000 data points per target (oldest evicted when full)
+- Data persists across app restart and process termination
 
 ### Retry with Exponential Backoff
-- Setiap target retry secara independen (tidak blocking target lain)
-- `set`/`update`: max 3 retry
-- `push`: max 5 retry
+- Each target retries independently (does not block other targets)
+- `set`/`update`: max 3 retries
+- `push`: max 5 retries
 - Base delay 1000ms, multiplier 2x, jitter ±200ms
-- Error non-transient (permission denied) langsung gagal tanpa retry
+- Non-transient errors (permission denied) fail immediately without retry
 
 ## Platform Setup
 
@@ -215,14 +215,14 @@ Add to `Info.plist`:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `configure(config)` | `Promise<void>` | Konfigurasi library |
-| `start()` | `Promise<void>` | Mulai tracking |
-| `stop()` | `Promise<void>` | Stop tracking (flush semua batch) |
-| `getStatus()` | `Promise<TrackingStatus>` | Status tracking saat ini |
-| `getQueuedLocations()` | `Promise<number>` | Total offline queue count |
-| `getQueuedLocationsByTarget()` | `Promise<Record<string, number>>` | Queue count per target path |
-| `onLocationUpdate(cb)` | `Subscription` | Listen location updates |
-| `onError(cb)` | `Subscription` | Listen errors |
+| `configure(config)` | `Promise<void>` | Configure the library |
+| `start()` | `Promise<void>` | Start tracking |
+| `stop()` | `Promise<void>` | Stop tracking (flushes all batches) |
+| `getStatus()` | `Promise<TrackingStatus>` | Get current tracking status |
+| `getQueuedLocations()` | `Promise<number>` | Get total offline queue count |
+| `getQueuedLocationsByTarget()` | `Promise<Record<string, number>>` | Get queue count per target path |
+| `onLocationUpdate(cb)` | `Subscription` | Listen for location updates |
+| `onError(cb)` | `Subscription` | Listen for errors |
 
 ## Error Codes
 
