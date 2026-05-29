@@ -78,14 +78,6 @@
   "engines": {
     "node": ">= 18.0.0"
   },
-  "codegenConfig": {
-    "name": "RNLiveTrackingSpec",
-    "type": "modules",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.livetracking"
-    }
-  },
   "react-native-builder-bob": {
     "source": "src",
     "output": "lib",
@@ -103,12 +95,18 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
+    "setupFiles": [
+      "./__tests__/setup.ts"
+    ],
     "moduleFileExtensions": [
       "ts",
       "tsx",
       "js",
       "jsx",
       "json"
+    ],
+    "testMatch": [
+      "**/__tests__/**/*.test.ts"
     ],
     "testPathIgnorePatterns": [
       "/node_modules/",

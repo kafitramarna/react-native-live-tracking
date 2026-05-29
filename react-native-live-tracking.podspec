@@ -15,7 +15,7 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => min_ios_version_supported }
   s.source       = { :git => package["repository"]["url"], :tag => "#{s.version}" }
 
-  s.source_files = "ios/**/*.{h,m,mm,swift}"
+  s.source_files = "ios/*.{h,m,mm,swift}"
 
   # Use install_modules_dependencies helper to install the dependencies if React Native version >=0.71.0.
   # See https://github.com/facebook/react-native/blob/febf6b7f33fdb4904669f99d795ebb4c80f770e3/scripts/cocoapods/new_architecture.rb#L79.
@@ -41,4 +41,7 @@ Pod::Spec.new do |s|
   end
 
   s.swift_version = "5.0"
+
+  s.dependency "FirebaseDatabase"
+  s.dependency "FirebaseFirestore"
 end
