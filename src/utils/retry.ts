@@ -13,11 +13,11 @@ export const DEFAULT_BASE_DELAY = 1000;
 /** Default maximum jitter in milliseconds (±) to avoid thundering herd */
 export const DEFAULT_MAX_JITTER = 200;
 
-/** Maximum retry attempts for current location writes */
-export const MAX_RETRIES_CURRENT_LOCATION = 3;
+/** Maximum retry attempts for sync targets using 'set' or 'update' write methods */
+export const MAX_RETRIES_SET_UPDATE = 3;
 
-/** Maximum retry attempts for history batch writes */
-export const MAX_RETRIES_HISTORY_BATCH = 5;
+/** Maximum retry attempts for sync targets using 'push' write method */
+export const MAX_RETRIES_PUSH = 5;
 
 /**
  * Calculates the delay before the next retry attempt using exponential backoff
