@@ -23,6 +23,20 @@ import type {
 import { validateConfig, applyDefaults } from './validation';
 
 /**
+ * Tracks whether configure() has been successfully called.
+ * Used to guard queue methods that require configuration.
+ */
+let isConfigured = false;
+
+/**
+ * Resets the configured state. Only for use in tests.
+ * @internal
+ */
+export function _resetConfiguredStateForTesting(): void {
+  isConfigured = false;
+}
+
+/**
  * LiveTracking module implementation.
  *
  * Wraps native module calls with validation, serialization,
@@ -33,8 +47,13 @@ const LiveTracking: LiveTrackingModule = {
    * Configure the tracking library with the given parameters.
    * Validates the config, applies defaults, and passes to native layer.
    *
+   * Serializes the full firebase object (service + targets array) as JSON,
+   * omitting undefined fields from each SyncTarget. Rejects if the
+   * serialized payload exceeds 1 MB.
+   *
    * @param config - The tracking configuration object
    * @throws Error with descriptive message if config is invalid
+   * @throws Error if serialized payload exceeds 1 MB
    */
   async configure(config: TrackingConfig): Promise<void> {
     // Validate configuration
@@ -49,11 +68,23 @@ const LiveTracking: LiveTrackingModule = {
     // Apply default values
     const finalConfig = applyDefaults(config);
 
-    // Serialize to JSON string for native module
+    // Serialize to JSON string for native module.
+    // JSON.stringify naturally omits undefined fields from SyncTarget objects.
     const jsonString = JSON.stringify(finalConfig);
+
+    // Payload size check: reject if JSON string exceeds 1 MB
+    const MAX_PAYLOAD_BYTES = 1024 * 1024; // 1 MB
+    if (jsonString.length > MAX_PAYLOAD_BYTES) {
+      throw new Error(
+        'Configuration payload is too large: serialized JSON exceeds 1 MB'
+      );
+    }
 
     // Call native module
     await NativeLiveTracking.configure(jsonString);
+
+    // Mark as configured after successful native call
+    isConfigured = true;
   },
 
   /**
@@ -111,12 +142,40 @@ const LiveTracking: LiveTrackingModule = {
   },
 
   /**
-   * Get the number of locations currently queued for sync.
+   * Get the total number of locations currently queued for sync across all targets.
    *
-   * @returns The number of queued locations
+   * @returns The total number of queued locations
+   * @throws Error with code NOT_CONFIGURED if called before configure()
    */
   async getQueuedLocations(): Promise<number> {
+    if (!isConfigured) {
+      const error = new Error(
+        'LiveTracking is not configured. Call configure() before getQueuedLocations().'
+      );
+      (error as any).code = 'NOT_CONFIGURED';
+      throw error;
+    }
     return await NativeLiveTracking.getQueuedLocations();
+  },
+
+  /**
+   * Get the number of queued locations per target path.
+   * Returns a record mapping each configured target path to its queued location count.
+   * Targets with offlineQueue disabled report 0.
+   *
+   * @returns Record of target path to queued location count
+   * @throws Error with code NOT_CONFIGURED if called before configure()
+   */
+  async getQueuedLocationsByTarget(): Promise<Record<string, number>> {
+    if (!isConfigured) {
+      const error = new Error(
+        'LiveTracking is not configured. Call configure() before getQueuedLocationsByTarget().'
+      );
+      (error as any).code = 'NOT_CONFIGURED';
+      throw error;
+    }
+    const jsonString = await NativeLiveTracking.getQueuedLocationsByTarget();
+    return JSON.parse(jsonString);
   },
 };
 

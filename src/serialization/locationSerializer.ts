@@ -1,84 +1,57 @@
 /**
- * Location serialization for Firebase paths.
+ * Location serialization for Firebase sync targets.
  *
- * Transforms LocationData into the appropriate format for
- * current location (overwrite) and history (append) paths.
+ * Transforms LocationData into a generic payload suitable for any
+ * sync target, regardless of write method (set, push, update).
  *
  * @packageDocumentation
  */
 
 import type { LocationData } from '../types';
 
-// ─── Payload Interfaces ──────────────────────────────────────────────────────
+// ─── Payload Interface ───────────────────────────────────────────────────────
 
 /**
- * Payload structure for the current location path (overwrite mode).
- * Contains the latest position with an updatedAt timestamp.
+ * Serialized location payload for any sync target.
+ *
+ * Contains required fields (latitude, longitude, timestamp, accuracy)
+ * and optional sensor fields (speed, heading, altitude) which are
+ * included as `null` when unavailable from the device sensor.
+ * Placeholder values (0, -1) are never used for unavailable fields.
  */
-export interface CurrentLocationPayload {
-  latitude: number;
-  longitude: number;
-  timestamp: number;
-  accuracy: number;
-  updatedAt: number;
-}
-
-/**
- * Payload structure for the history path (append mode).
- * Contains full location data including speed, altitude, and bearing.
- */
-export interface HistoryLocationPayload {
+export interface TargetLocationPayload {
   latitude: number;
   longitude: number;
   timestamp: number;
   accuracy: number;
   speed: number | null;
+  heading: number | null;
   altitude: number | null;
-  bearing: number | null;
 }
 
-// ─── Serialization Functions ─────────────────────────────────────────────────
+// ─── Serialization Function ──────────────────────────────────────────────────
 
 /**
- * Serialize a LocationData object for the Firebase current location path.
+ * Serialize a LocationData object for a generic Firebase sync target.
  *
- * The current location path uses overwrite (set/update) mode and includes
- * an `updatedAt` field set to the location's timestamp.
- *
- * @param location - The location data to serialize
- * @returns Serialized payload for the current location path
- */
-export function serializeForCurrentPath(
-  location: LocationData
-): CurrentLocationPayload {
-  return {
-    latitude: location.latitude,
-    longitude: location.longitude,
-    timestamp: location.timestamp,
-    accuracy: location.accuracy,
-    updatedAt: location.timestamp,
-  };
-}
-
-/**
- * Serialize a LocationData object for the Firebase history path.
- *
- * The history path uses append (push) mode and includes all available
- * location fields: speed, altitude, and bearing.
+ * Produces a payload containing all required location fields and optional
+ * sensor fields. When optional fields (speed, heading/bearing, altitude)
+ * are unavailable from the device sensor, they are included as `null`.
+ * Default placeholder values (0, -1) are never written for unavailable fields.
  *
  * @param location - The location data to serialize
- * @returns Serialized payload for the history path
+ * @returns Serialized payload for the sync target
  */
-export function serializeForHistoryPath(
+export function serializeLocationForTarget(
   location: LocationData
-): HistoryLocationPayload {
+): TargetLocationPayload {
   return {
     latitude: location.latitude,
     longitude: location.longitude,
     timestamp: location.timestamp,
     accuracy: location.accuracy,
     speed: location.speed,
+    heading: location.bearing,
     altitude: location.altitude,
-    bearing: location.bearing,
   };
 }
