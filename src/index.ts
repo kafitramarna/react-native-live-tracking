@@ -15,6 +15,7 @@ export { default as LiveTracking } from './LiveTracking';
 // Re-export all types
 export { TrackingState } from './types';
 export type {
+  SyncTarget,
   OptimizationConfig,
   AndroidNotificationConfig,
   FirebaseConfig,
@@ -41,10 +42,8 @@ export { calculateDistance } from './utils/distance';
 export { shouldAcceptLocation } from './filters/distanceTimeFilter';
 
 // Location serialization for Firebase
-export {
-  serializeForCurrentPath,
-  serializeForHistoryPath,
-} from './serialization/locationSerializer';
+export { serializeLocationForTarget } from './serialization/locationSerializer';
+export type { TargetLocationPayload } from './serialization/locationSerializer';
 
 // Retry/backoff utilities
 export { calculateBackoffDelay, shouldRetry } from './utils/retry';

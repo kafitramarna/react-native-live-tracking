@@ -47,17 +47,28 @@ export interface AndroidNotificationConfig {
 }
 
 /**
- * Firebase connection and path configuration.
+ * A user-defined sync target specifying a Firebase path, write method,
+ * and optional batching/offline queue settings.
+ */
+export interface SyncTarget {
+  /** Firebase path to write to */
+  path: string;
+  /** Write method: 'set' (overwrite), 'push' (append), 'update' (merge) */
+  method: 'set' | 'push' | 'update';
+  /** Number of points to accumulate before writing. Default: 1 (immediate) */
+  batchSize?: number;
+  /** Whether to persist data offline when device has no connectivity */
+  offlineQueue?: boolean;
+}
+
+/**
+ * Firebase connection and sync target configuration.
  */
 export interface FirebaseConfig {
   /** Firebase service type: Realtime Database or Firestore */
   service: 'RTDB' | 'Firestore';
-  /** Path for current location (overwrite mode). At least one path must be configured. */
-  currentLocationPath?: string;
-  /** Path for location history (append mode). At least one path must be configured. */
-  historyPath?: string;
-  /** Number of locations to batch before sending to history path. Default: 15 */
-  historyBatchSize?: number;
+  /** Array of sync targets (at least one required) */
+  targets: [SyncTarget, ...SyncTarget[]];
 }
 
 /**
@@ -204,4 +215,10 @@ export interface LiveTrackingModule {
    * Get the number of locations currently queued for sync.
    */
   getQueuedLocations(): Promise<number>;
+
+  /**
+   * Get the number of queued locations per target path.
+   * Returns a record mapping each configured target path to its queued location count.
+   */
+  getQueuedLocationsByTarget(): Promise<Record<string, number>>;
 }
