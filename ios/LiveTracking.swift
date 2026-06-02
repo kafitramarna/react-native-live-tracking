@@ -20,7 +20,7 @@ import CoreLocation
  * Requirements: 3.1, 4.4, 9.3, 9.4, 10.1, 10.2, 10.3, 10.4
  */
 @objc(LiveTracking)
-class LiveTracking: RCTEventEmitter {
+class LiveTracking: RCTEventEmitter, RCTTurboModule {
 
     // MARK: - Event Names
 

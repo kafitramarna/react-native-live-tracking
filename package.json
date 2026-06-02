@@ -79,6 +79,14 @@
   "engines": {
     "node": ">= 18.0.0"
   },
+  "codegenConfig": {
+    "name": "RNLiveTrackingSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "ios": {
+      "componentProvider": {}
+    }
+  },
   "react-native-builder-bob": {
     "source": "src",
     "output": "lib",

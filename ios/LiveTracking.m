@@ -2,9 +2,11 @@
 #import <React/RCTEventEmitter.h>
 
 /**
- * Objective-C bridge macro for exposing the Swift module to React Native.
- * Inherits from RCTEventEmitter to support event emission to JavaScript.
- * This file provides backward compatibility with the old architecture (Bridge).
+ * Objective-C bridge file for the LiveTracking Swift module.
+ *
+ * Uses RCT_EXTERN_MODULE to expose Swift methods to React Native.
+ * Also conforms to RCTTurboModule so the module is discoverable via
+ * TurboModuleRegistry in New Architecture / Bridgeless mode (RN 0.76+).
  */
 @interface RCT_EXTERN_MODULE(LiveTracking, RCTEventEmitter)
 

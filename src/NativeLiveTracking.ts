@@ -1,14 +1,19 @@
-import { NativeModules, Platform } from 'react-native';
-
 /**
- * Native module interface for react-native-live-tracking.
+ * Codegen spec for react-native-live-tracking.
  *
- * Uses NativeModules (Bridge) which is automatically wrapped by
- * React Native's interop layer when New Architecture is enabled.
- * This provides full compatibility with both old and new architecture
- * without requiring codegen setup.
+ * Uses TurboModuleRegistry.get (not getEnforcing) so that a missing or
+ * not-yet-registered module returns null instead of throwing synchronously.
+ * A top-level throw would corrupt the module graph and leave upstream
+ * importers (TrackingProvider, AppNavigator) with undefined module records.
+ *
+ * File must be named Native*.ts and live in the codegenConfig.jsSrcsDir
+ * for RN's codegen to pick it up.
  */
-interface LiveTrackingNativeModule {
+
+import type { TurboModule } from 'react-native';
+import { TurboModuleRegistry } from 'react-native';
+
+export interface Spec extends TurboModule {
   configure(config: string): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -19,19 +24,6 @@ interface LiveTrackingNativeModule {
   removeListeners(count: number): void;
 }
 
-const LiveTrackingModule: LiveTrackingNativeModule = NativeModules.LiveTracking;
-
-if (!LiveTrackingModule) {
-  const message = Platform.select({
-    ios:
-      "The package '@kafitra/react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
-      '- You ran `pod install` in the ios directory\n' +
-      '- You rebuilt the app after installing the package\n',
-    default:
-      "The package '@kafitra/react-native-live-tracking' doesn't seem to be linked. Make sure:\n" +
-      '- You rebuilt the app after installing the package\n',
-  });
-  throw new Error(message!);
-}
-
-export default LiveTrackingModule;
+// Use .get (not .getEnforcing) — returns null if the module is absent
+// rather than throwing, so the module graph initialises cleanly.
+export default TurboModuleRegistry.get<Spec>('LiveTracking');

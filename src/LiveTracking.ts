@@ -23,6 +23,21 @@ import type {
 import { validateConfig, applyDefaults } from './validation';
 
 /**
+ * Returns the native module or throws a descriptive error if not linked.
+ * Using a function accessor (rather than assertNative) keeps TypeScript
+ * happy since it can't narrow an imported binding via assertion functions.
+ */
+function native(): NonNullable<typeof NativeLiveTracking> {
+  if (!NativeLiveTracking) {
+    throw new Error(
+      "[@kafitra/react-native-live-tracking] Native module 'LiveTracking' is not registered. " +
+        'Make sure you ran `pod install` and rebuilt the app from Xcode.'
+    );
+  }
+  return NativeLiveTracking;
+}
+
+/**
  * Tracks whether configure() has been successfully called.
  * Used to guard queue methods that require configuration.
  */
@@ -46,17 +61,8 @@ const LiveTracking: LiveTrackingModule = {
   /**
    * Configure the tracking library with the given parameters.
    * Validates the config, applies defaults, and passes to native layer.
-   *
-   * Serializes the full firebase object (service + targets array) as JSON,
-   * omitting undefined fields from each SyncTarget. Rejects if the
-   * serialized payload exceeds 1 MB.
-   *
-   * @param config - The tracking configuration object
-   * @throws Error with descriptive message if config is invalid
-   * @throws Error if serialized payload exceeds 1 MB
    */
   async configure(config: TrackingConfig): Promise<void> {
-    // Validate configuration
     const validationResult = validateConfig(config);
     if (!validationResult.valid) {
       const errorMessages = validationResult.errors
@@ -65,14 +71,9 @@ const LiveTracking: LiveTrackingModule = {
       throw new Error(`Invalid configuration: ${errorMessages}`);
     }
 
-    // Apply default values
     const finalConfig = applyDefaults(config);
-
-    // Serialize to JSON string for native module.
-    // JSON.stringify naturally omits undefined fields from SyncTarget objects.
     const jsonString = JSON.stringify(finalConfig);
 
-    // Payload size check: reject if JSON string exceeds 1 MB
     const MAX_PAYLOAD_BYTES = 1024 * 1024; // 1 MB
     if (jsonString.length > MAX_PAYLOAD_BYTES) {
       throw new Error(
@@ -80,10 +81,7 @@ const LiveTracking: LiveTrackingModule = {
       );
     }
 
-    // Call native module
-    await NativeLiveTracking.configure(jsonString);
-
-    // Mark as configured after successful native call
+    await native().configure(jsonString);
     isConfigured = true;
   },
 
@@ -92,25 +90,18 @@ const LiveTracking: LiveTrackingModule = {
    * Requires `configure()` to have been called first.
    */
   async start(): Promise<void> {
-    await NativeLiveTracking.start();
+    await native().start();
   },
 
   /**
    * Stop location tracking and clean up resources.
-   * Stops sending events to all registered listeners.
    */
   async stop(): Promise<void> {
-    await NativeLiveTracking.stop();
+    await native().stop();
   },
 
   /**
    * Register a callback for location updates.
-   *
-   * The callback is invoked each time a valid location update is emitted
-   * from the native layer after passing the Distance/Time Matrix filter.
-   *
-   * @param callback - Function called with LocationData on each update
-   * @returns Subscription with `remove()` method to unsubscribe
    */
   onLocationUpdate(callback: (location: LocationData) => void): Subscription {
     return emitterOnLocationUpdate(callback);
@@ -118,12 +109,6 @@ const LiveTracking: LiveTrackingModule = {
 
   /**
    * Register a callback for tracking errors.
-   *
-   * The callback is invoked when an error occurs during tracking
-   * (e.g., permission denied, GPS disabled, Firebase write failure).
-   *
-   * @param callback - Function called with TrackingError on each error event
-   * @returns Subscription with `remove()` method to unsubscribe
    */
   onError(callback: (error: TrackingError) => void): Subscription {
     return emitterOnError(callback);
@@ -131,20 +116,15 @@ const LiveTracking: LiveTrackingModule = {
 
   /**
    * Get the current tracking status.
-   * Calls native module and parses the JSON response.
-   *
-   * @returns The current TrackingStatus
    */
   async getStatus(): Promise<TrackingStatus> {
-    const jsonString = await NativeLiveTracking.getStatus();
-    const status: TrackingStatus = JSON.parse(jsonString);
-    return status;
+    const jsonString = await native().getStatus();
+    return JSON.parse(jsonString) as TrackingStatus;
   },
 
   /**
-   * Get the total number of locations currently queued for sync across all targets.
+   * Get the total number of locations currently queued for sync.
    *
-   * @returns The total number of queued locations
    * @throws Error with code NOT_CONFIGURED if called before configure()
    */
   async getQueuedLocations(): Promise<number> {
@@ -155,15 +135,12 @@ const LiveTracking: LiveTrackingModule = {
       (error as any).code = 'NOT_CONFIGURED';
       throw error;
     }
-    return await NativeLiveTracking.getQueuedLocations();
+    return native().getQueuedLocations();
   },
 
   /**
    * Get the number of queued locations per target path.
-   * Returns a record mapping each configured target path to its queued location count.
-   * Targets with offlineQueue disabled report 0.
    *
-   * @returns Record of target path to queued location count
    * @throws Error with code NOT_CONFIGURED if called before configure()
    */
   async getQueuedLocationsByTarget(): Promise<Record<string, number>> {
@@ -174,7 +151,7 @@ const LiveTracking: LiveTrackingModule = {
       (error as any).code = 'NOT_CONFIGURED';
       throw error;
     }
-    const jsonString = await NativeLiveTracking.getQueuedLocationsByTarget();
+    const jsonString = await native().getQueuedLocationsByTarget();
     return JSON.parse(jsonString);
   },
 };
