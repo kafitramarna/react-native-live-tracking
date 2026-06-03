@@ -11,7 +11,7 @@
  */
 
 import type { TurboModule } from 'react-native';
-import { TurboModuleRegistry } from 'react-native';
+import { TurboModuleRegistry, NativeModules } from 'react-native';
 
 export interface Spec extends TurboModule {
   configure(config: string): Promise<void>;
@@ -24,6 +24,6 @@ export interface Spec extends TurboModule {
   removeListeners(count: number): void;
 }
 
-// Use .get (not .getEnforcing) — returns null if the module is absent
-// rather than throwing, so the module graph initialises cleanly.
-export default TurboModuleRegistry.get<Spec>('LiveTracking');
+// Try TurboModule first (new arch with codegen), fall back to Bridge (old arch / interop)
+export default (TurboModuleRegistry.get<Spec>('LiveTracking') ??
+  NativeModules.LiveTracking) as Spec | null;

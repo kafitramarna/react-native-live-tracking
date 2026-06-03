@@ -10,7 +10,7 @@ Real-time location tracking library for React Native with Firebase synchronizati
 - **Battery Optimization** — Distance/Time matrix filter + Motion Sleep Mode
 - **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED)
 - **Cross-Platform** — iOS 13+ & Android API 21+
-- **New Architecture Ready** — Supports TurboModules + legacy Bridge
+- **New Architecture Ready** — Works with both TurboModules (New Arch) and legacy Bridge (Old Arch) via interop
 
 ## Installation
 
@@ -21,6 +21,51 @@ yarn add @kafitra/react-native-live-tracking
 ```
 
 ### iOS
+
+#### 1. Podfile Setup
+
+This library depends on `FirebaseDatabase` and `FirebaseFirestore`. If you use `react-native-firebase`, add the required modular headers and permissions in your `Podfile`:
+
+```ruby
+$RNFirebaseAsStaticFramework = true
+
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+require_relative '../node_modules/react-native-permissions/scripts/setup'
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+target 'YourApp' do
+  # Firebase modular headers (required for Swift static library integration)
+  pod 'GoogleUtilities', :modular_headers => true
+  pod 'FirebaseCore', :modular_headers => true
+  pod 'FirebaseCoreExtension', :modular_headers => true
+  pod 'FirebaseCoreInternal', :modular_headers => true
+  pod 'FirebaseAppCheckInterop', :modular_headers => true
+  pod 'FirebaseDatabase', :modular_headers => true
+  pod 'FirebaseFirestore', :modular_headers => true
+  pod 'FirebaseFirestoreInternal', :modular_headers => true
+  pod 'leveldb-library', :modular_headers => true
+
+  # Permissions required by live-tracking
+  setup_permissions([
+    'LocationAlways',
+    'LocationWhenInUse',
+    'Motion',
+  ])
+
+  config = use_native_modules!
+  use_react_native!(:path => config[:reactNativePath])
+end
+```
+
+#### 2. Install Pods
+
 ```bash
 cd ios && pod install
 ```
@@ -69,6 +114,53 @@ await LiveTracking.start();
 // 4. Stop when done
 await LiveTracking.stop();
 subscription.remove();
+```
+
+## Usage with React Native (TrackingProvider Pattern)
+
+A common pattern is to wrap tracking in a provider that reacts to backend status changes (e.g., via Firebase RTDB):
+
+```typescript
+import React, { useEffect } from 'react';
+import LiveTracking from '@kafitra/react-native-live-tracking';
+import database from '@react-native-firebase/database';
+
+const TRACKING_STATUS = { READY: 0, ON_PROGRESS: 1, COMPLETED: 2 } as const;
+
+async function startLiveTracking(deliveryNoteId: string | number) {
+  await LiveTracking.configure({
+    firebase: {
+      service: 'RTDB',
+      targets: [
+        { path: `delivery/${deliveryNoteId}/current`, method: 'set' },
+        { path: `delivery/${deliveryNoteId}/history`, method: 'push', batchSize: 10, offlineQueue: true },
+      ],
+    },
+    optimization: { intervalMs: 10000, distanceFilterMeters: 10, stopWhenStill: true },
+    androidNotification: {
+      title: 'Delivery In Progress',
+      text: 'Tracking your location...',
+    },
+  });
+  await LiveTracking.start();
+}
+
+export function TrackingProvider({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    const statusRef = database().ref(`delivery/188/status`);
+    const onValue = statusRef.on('value', (snapshot) => {
+      const status = snapshot.val();
+      if (status === TRACKING_STATUS.ON_PROGRESS) {
+        startLiveTracking(188).catch(console.warn);
+      } else if (status === TRACKING_STATUS.COMPLETED) {
+        LiveTracking.stop().catch(console.warn);
+      }
+    });
+    return () => statusRef.off('value', onValue);
+  }, []);
+
+  return <>{children}</>;
+}
 ```
 
 ## Sync Targets
@@ -183,33 +275,67 @@ When `stopWhenStill: true` and device is stationary for > 3 minutes:
 
 ### Android
 
+#### Permissions
+
 Add to `AndroidManifest.xml`:
 ```xml
+<!-- Location -->
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+<!-- Foreground Service (required for background tracking notification) -->
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+<!-- Optional: Notification permission (Android 13+) -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+<!-- Optional: Auto-restart tracking after device reboot -->
 <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+<!-- Optional: Motion Sleep Mode (reduce battery when stationary) -->
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+<!-- Network state detection for offline queue sync -->
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+```
+
+> **Note:** You must request runtime permissions (`ACCESS_FINE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `POST_NOTIFICATIONS`) before calling `LiveTracking.start()`. The library will reject with `PERMISSION_DENIED` if required permissions are not granted.
+
+#### Firebase Setup
+
+Ensure your app has `google-services.json` in `android/app/` and the Google Services plugin applied in your `android/app/build.gradle`:
+```groovy
+apply plugin: 'com.google.gms.google-services'
 ```
 
 ### iOS
 
-Add to `Info.plist`:
+#### Info.plist
+
+Add the following keys to your `Info.plist`:
 ```xml
+<!-- Required: Location permission descriptions -->
 <key>NSLocationWhenInUseUsageDescription</key>
-<string>Your location usage description</string>
+<string>App needs your location to track deliveries in real-time.</string>
 <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-<string>Your background location usage description</string>
+<string>App needs background location access to track deliveries while the app is in the background.</string>
+
+<!-- Optional: Motion permission for stopWhenStill battery optimization -->
 <key>NSMotionUsageDescription</key>
-<string>Used to optimize battery when stationary</string>
+<string>Used to optimize battery usage when stationary.</string>
+
+<!-- Required: Enable background location updates -->
 <key>UIBackgroundModes</key>
 <array>
     <string>location</string>
 </array>
 ```
+
+#### Firebase Setup
+
+Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 
 ## API Reference
 
