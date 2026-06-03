@@ -16,14 +16,21 @@ protocol LocationUpdateDelegate: AnyObject {
  */
 class LocationEngine: NSObject, CLLocationManagerDelegate {
 
-    private let locationManager: CLLocationManager
+    private var locationManager: CLLocationManager!
 
     weak var delegate: LocationUpdateDelegate?
 
     override init() {
-        locationManager = CLLocationManager()
         super.init()
-        locationManager.delegate = self
+        let initOnMain = { [self] in
+            self.locationManager = CLLocationManager()
+            self.locationManager.delegate = self
+        }
+        if Thread.isMainThread {
+            initOnMain()
+        } else {
+            DispatchQueue.main.sync(execute: initOnMain)
+        }
     }
 
     // MARK: - Public Methods
@@ -48,18 +55,32 @@ class LocationEngine: NSObject, CLLocationManagerDelegate {
      * - Parameter accuracy: The desired location accuracy (e.g., kCLLocationAccuracyBest or kCLLocationAccuracyKilometer)
      */
     func startLocationUpdates(intervalMs: Int, distanceFilter: Double, accuracy: CLLocationAccuracy) {
-        locationManager.desiredAccuracy = accuracy
-        locationManager.distanceFilter = distanceFilter
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.pausesLocationUpdatesAutomatically = false
-        locationManager.startUpdatingLocation()
+        let setup = { [weak self] in
+            guard let self = self else { return }
+            self.locationManager.desiredAccuracy = accuracy
+            self.locationManager.distanceFilter = distanceFilter
+            self.locationManager.allowsBackgroundLocationUpdates = true
+            self.locationManager.pausesLocationUpdatesAutomatically = false
+            self.locationManager.startUpdatingLocation()
+        }
+        if Thread.isMainThread {
+            setup()
+        } else {
+            DispatchQueue.main.async(execute: setup)
+        }
     }
 
     /**
      * Stop receiving location updates.
      */
     func stopLocationUpdates() {
-        locationManager.stopUpdatingLocation()
+        if Thread.isMainThread {
+            locationManager.stopUpdatingLocation()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.locationManager.stopUpdatingLocation()
+            }
+        }
     }
 
     // MARK: - CLLocationManagerDelegate
