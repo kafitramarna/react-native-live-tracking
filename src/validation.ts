@@ -58,6 +58,11 @@ export function validateConfig(config: unknown): ConfigValidationResult {
     validateAndroidNotification(cfg['androidNotification'], errors);
   }
 
+  // Validate iosNotification (optional)
+  if (cfg['iosNotification'] !== undefined) {
+    validateIOSNotification(cfg['iosNotification'], errors);
+  }
+
   return {
     valid: errors.length === 0,
     errors,
@@ -455,6 +460,46 @@ function validateAndroidNotification(
     errors.push({
       field: 'androidNotification.text',
       message: 'androidNotification.text must be a non-empty string',
+      code: 'REQUIRED_FIELD',
+    });
+  }
+}
+
+function validateIOSNotification(
+  notification: unknown,
+  errors: ConfigError[]
+): void {
+  if (typeof notification !== 'object' || notification === null) {
+    errors.push({
+      field: 'iosNotification',
+      message: 'iosNotification must be an object',
+      code: 'INVALID_TYPE',
+    });
+    return;
+  }
+
+  const notif = notification as Record<string, unknown>;
+
+  // title (required, non-empty string)
+  if (
+    typeof notif['title'] !== 'string' ||
+    (notif['title'] as string).trim().length === 0
+  ) {
+    errors.push({
+      field: 'iosNotification.title',
+      message: 'iosNotification.title must be a non-empty string',
+      code: 'REQUIRED_FIELD',
+    });
+  }
+
+  // text (required, non-empty string)
+  if (
+    typeof notif['text'] !== 'string' ||
+    (notif['text'] as string).trim().length === 0
+  ) {
+    errors.push({
+      field: 'iosNotification.text',
+      message: 'iosNotification.text must be a non-empty string',
       code: 'REQUIRED_FIELD',
     });
   }

@@ -47,6 +47,17 @@ export interface AndroidNotificationConfig {
 }
 
 /**
+ * iOS persistent notification configuration.
+ * Shows a local notification while tracking is active (similar to Android's foreground service notification).
+ */
+export interface IOSNotificationConfig {
+  /** Notification title */
+  title: string;
+  /** Notification body text */
+  text: string;
+}
+
+/**
  * A user-defined sync target specifying a Firebase path, write method,
  * and optional batching/offline queue settings.
  */
@@ -79,6 +90,8 @@ export interface TrackingConfig {
   optimization: OptimizationConfig;
   /** Android foreground service notification settings (Android only) */
   androidNotification?: AndroidNotificationConfig;
+  /** iOS persistent notification settings (iOS only) */
+  iosNotification?: IOSNotificationConfig;
   /** Firebase connection and path configuration */
   firebase: FirebaseConfig;
 }

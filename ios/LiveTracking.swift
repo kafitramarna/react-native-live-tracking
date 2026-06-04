@@ -56,6 +56,8 @@ class LiveTracking: RCTEventEmitter {
     private var intervalMs: Int = 10000
     private var distanceFilterMeters: Double = 10.0
     private var stopWhenStill: Bool = true
+    private var iosNotificationTitle: String?
+    private var iosNotificationText: String?
 
     // MARK: - Tracking State
 
@@ -146,6 +148,12 @@ class LiveTracking: RCTEventEmitter {
         if parsedDistanceFilter < 0 {
             reject("INVALID_CONFIG", "optimization.distanceFilterMeters must be non-negative", nil)
             return
+        }
+
+        // Parse iosNotification config (optional)
+        if let iosNotificationConfig = json["iosNotification"] as? [String: Any] {
+            self.iosNotificationTitle = iosNotificationConfig["title"] as? String
+            self.iosNotificationText = iosNotificationConfig["text"] as? String
         }
 
         // Store configuration
@@ -242,6 +250,12 @@ class LiveTracking: RCTEventEmitter {
             return
         }
 
+        // Show persistent notification if configured
+        if let title = iosNotificationTitle, let text = iosNotificationText {
+            TrackingNotificationManager.shared.configure(title: title, body: text)
+            TrackingNotificationManager.shared.showTrackingNotification()
+        }
+
         // Start location engine
         locationEngine.startLocationUpdates(intervalMs: intervalMs, distanceFilter: distanceFilterMeters)
 
@@ -284,6 +298,9 @@ class LiveTracking: RCTEventEmitter {
             resolve(nil)
             return
         }
+
+        // Remove persistent notification
+        TrackingNotificationManager.shared.removeTrackingNotification()
 
         // Flush all partial batches before stopping (Requirement 4.4)
         syncEngineController?.flushAll { [weak self] in
