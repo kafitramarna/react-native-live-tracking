@@ -1,6 +1,12 @@
 package com.livetracking
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.location.Location
+import android.location.LocationManager
+import android.os.Build
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.Promise
@@ -49,12 +55,19 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
         private const val DEFAULT_INTERVAL_MS = 10000L
         private const val DEFAULT_DISTANCE_FILTER_METERS = 10f
         private const val DEFAULT_STOP_WHEN_STILL = true
+        private const val DEFAULT_OPTIMIZATION_MODE = "both"
 
         // Tracking states
         private const val STATE_IDLE = "idle"
         private const val STATE_CONFIGURED = "configured"
         private const val STATE_TRACKING = "tracking"
         private const val STATE_MOTION_SLEEP = "motion_sleep"
+        private const val STATE_PAUSED_GPS = "paused_gps"
+
+        // Error codes
+        const val ERROR_GPS_DISABLED = "GPS_DISABLED"
+        const val ERROR_GPS_ENABLED = "GPS_ENABLED"
+        const val ERROR_PERMISSION_REVOKED = "PERMISSION_REVOKED"
     }
 
     // Engines
@@ -70,17 +83,22 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
     private var intervalMs: Long = DEFAULT_INTERVAL_MS
     private var distanceFilterMeters: Float = DEFAULT_DISTANCE_FILTER_METERS
     private var stopWhenStill: Boolean = DEFAULT_STOP_WHEN_STILL
+    private var optimizationMode: String = DEFAULT_OPTIMIZATION_MODE
     private var firebaseService: String? = null
+    private var notificationEnabled: Boolean = true
     private var notificationTitle: String = "Live Tracking"
     private var notificationText: String = "Tracking your location"
     private var notificationIcon: String? = null
     private var notificationChannelId: String = TrackingForegroundService.DEFAULT_CHANNEL_ID
     private var notificationChannelName: String = TrackingForegroundService.DEFAULT_CHANNEL_NAME
+    private var iosNotificationEnabled: Boolean = true
 
     // State
     private var trackingState: String = STATE_IDLE
     private var lastLocation: Location? = null
     private var lastUpdateTimestamp: Long = 0L
+    private var wasTrackingBeforeGpsDisabled: Boolean = false
+    private var gpsStatusReceiver: android.content.BroadcastReceiver? = null
 
     /**
      * Parse JSON config string and create all engines with config values.
@@ -102,6 +120,7 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
                 intervalMs = optimization.optLong("intervalMs", DEFAULT_INTERVAL_MS)
                 distanceFilterMeters = optimization.optDouble("distanceFilterMeters", DEFAULT_DISTANCE_FILTER_METERS.toDouble()).toFloat()
                 stopWhenStill = optimization.optBoolean("stopWhenStill", DEFAULT_STOP_WHEN_STILL)
+                optimizationMode = optimization.optString("mode", DEFAULT_OPTIMIZATION_MODE)
             }
 
             // Validate optimization values
@@ -111,6 +130,10 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             }
             if (distanceFilterMeters <= 0) {
                 promise.reject("INVALID_CONFIG", "optimization.distanceFilterMeters must be greater than 0")
+                return
+            }
+            if (optimizationMode != "interval" && optimizationMode != "distance" && optimizationMode != "both") {
+                promise.reject("INVALID_CONFIG", "optimization.mode must be 'interval', 'distance', or 'both'")
                 return
             }
 
@@ -139,11 +162,18 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             // Parse Android notification config
             val androidNotification = json.optJSONObject("androidNotification")
             if (androidNotification != null) {
+                notificationEnabled = androidNotification.optBoolean("enabled", true)
                 notificationTitle = androidNotification.optString("title", "Live Tracking")
                 notificationText = androidNotification.optString("text", "Tracking your location")
                 notificationIcon = androidNotification.optString("icon", "").ifEmpty { null }
                 notificationChannelId = androidNotification.optString("channelId", TrackingForegroundService.DEFAULT_CHANNEL_ID)
                 notificationChannelName = androidNotification.optString("channelName", TrackingForegroundService.DEFAULT_CHANNEL_NAME)
+            }
+
+            // Parse iOS notification config
+            val iosNotification = json.optJSONObject("iosNotification")
+            if (iosNotification != null) {
+                iosNotificationEnabled = iosNotification.optBoolean("enabled", true)
             }
 
             // Initialize engines (including SyncEngineController with targets)
@@ -185,30 +215,23 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
         }
 
         try {
-            // Start foreground service
+            // Start foreground service (always required for background tracking on Android)
+            val foregroundTitle = if (notificationEnabled) notificationTitle else "Live Tracking"
+            val foregroundText = if (notificationEnabled) notificationText else "Tracking your location"
             TrackingForegroundService.start(
                 context = reactContext,
-                title = notificationTitle,
-                text = notificationText,
-                icon = notificationIcon,
+                title = foregroundTitle,
+                text = foregroundText,
+                icon = if (notificationEnabled) notificationIcon else null,
                 channelId = notificationChannelId,
                 channelName = notificationChannelName
             )
 
-            // Start location engine
-            locationEngine?.startLocationUpdates(intervalMs, distanceFilterMeters)
+            // Start tracking engines
+            startLocationTracking()
 
-            // Start activity recognition (for motion sleep mode)
-            if (stopWhenStill) {
-                try {
-                    activityRecognitionHandler?.startActivityRecognition()
-                } catch (e: SecurityException) {
-                    // Activity recognition permission not granted, continue without it
-                }
-            }
-
-            // Start network listener
-            networkListener?.startListening()
+            // Monitor GPS status changes so we can pause/resume automatically
+            registerGpsStatusListener()
 
             // Save tracking state for boot receiver
             TrackingStateStore.saveTrackingActive(reactContext, true)
@@ -235,17 +258,14 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             // Flush all partially-filled batches before stopping (Requirement 4.4)
             syncEngineController?.flushAll()
 
-            // Stop location engine
-            locationEngine?.stopLocationUpdates()
-
-            // Stop activity recognition
-            activityRecognitionHandler?.stopActivityRecognition()
-
-            // Stop network listener
-            networkListener?.stopListening()
+            // Stop tracking engines
+            stopLocationTracking()
 
             // Stop foreground service
             TrackingForegroundService.stop(reactContext)
+
+            // Unregister GPS status listener
+            unregisterGpsStatusListener()
 
             // Save tracking state as inactive
             TrackingStateStore.saveTrackingActive(reactContext, false)
@@ -254,10 +274,144 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             trackingState = STATE_CONFIGURED
             lastLocation = null
             lastUpdateTimestamp = 0L
+            wasTrackingBeforeGpsDisabled = false
 
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("STOP_FAILED", "Failed to stop tracking: ${e.message}")
+        }
+    }
+
+    /**
+     * Start location engine, activity recognition, and network listener.
+     */
+    private fun startLocationTracking() {
+        // Start location engine
+        // When mode is 'interval', pass 0f distance filter so FusedLocationProvider
+        // delivers updates purely on interval without distance gating
+        val effectiveDistanceFilter = if (optimizationMode == "interval") 0f else distanceFilterMeters
+        locationEngine?.startLocationUpdates(intervalMs, effectiveDistanceFilter)
+
+        // Start activity recognition (for motion sleep mode)
+        if (stopWhenStill) {
+            try {
+                activityRecognitionHandler?.startActivityRecognition()
+            } catch (e: SecurityException) {
+                // Activity recognition permission not granted, continue without it
+            }
+        }
+
+        // Start network listener
+        networkListener?.startListening()
+    }
+
+    /**
+     * Stop location engine, activity recognition, and network listener.
+     */
+    private fun stopLocationTracking() {
+        // Stop location engine
+        locationEngine?.stopLocationUpdates()
+
+        // Stop activity recognition
+        activityRecognitionHandler?.stopActivityRecognition()
+
+        // Stop network listener
+        networkListener?.stopListening()
+    }
+
+    /**
+     * Register a BroadcastReceiver that listens for GPS/location mode changes.
+     * When GPS is disabled during an active tracking session, tracking is paused.
+     * When GPS is re-enabled, tracking resumes automatically.
+     */
+    private fun registerGpsStatusListener() {
+        if (gpsStatusReceiver != null) return
+
+        gpsStatusReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                checkGpsStatus()
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(LocationManager.PROVIDERS_CHANGED_ACTION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                addAction(LocationManager.MODE_CHANGED_ACTION)
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            reactContext.registerReceiver(
+                gpsStatusReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            reactContext.registerReceiver(gpsStatusReceiver, filter)
+        }
+    }
+
+    /**
+     * Unregister the GPS status BroadcastReceiver.
+     */
+    private fun unregisterGpsStatusListener() {
+        gpsStatusReceiver?.let { receiver ->
+            try {
+                reactContext.unregisterReceiver(receiver)
+            } catch (e: IllegalArgumentException) {
+                // Receiver was not registered, ignore
+            }
+            gpsStatusReceiver = null
+        }
+    }
+
+    /**
+     * Check current GPS status and pause/resume tracking accordingly.
+     */
+    private fun checkGpsStatus() {
+        val gpsEnabled = permissionHandler.isGpsEnabled(reactContext)
+
+        if (!gpsEnabled && (trackingState == STATE_TRACKING || trackingState == STATE_MOTION_SLEEP)) {
+            pauseTrackingDueToGps()
+        } else if (gpsEnabled && trackingState == STATE_PAUSED_GPS && wasTrackingBeforeGpsDisabled) {
+            resumeTrackingAfterGps()
+        }
+    }
+
+    /**
+     * Pause tracking when GPS is disabled while tracking is active.
+     * Keeps the foreground service running so tracking can resume automatically.
+     */
+    private fun pauseTrackingDueToGps() {
+        wasTrackingBeforeGpsDisabled = true
+        stopLocationTracking()
+        trackingState = STATE_PAUSED_GPS
+        emitError(
+            ERROR_GPS_DISABLED,
+            "GPS/Location services were disabled. Tracking paused and will resume automatically when GPS is enabled."
+        )
+    }
+
+    /**
+     * Resume tracking after GPS has been re-enabled.
+     */
+    private fun resumeTrackingAfterGps() {
+        try {
+            startLocationTracking()
+            trackingState = STATE_TRACKING
+            emitError(
+                ERROR_GPS_ENABLED,
+                "GPS/Location services are enabled. Tracking resumed."
+            )
+        } catch (e: SecurityException) {
+            trackingState = STATE_CONFIGURED
+            wasTrackingBeforeGpsDisabled = false
+            emitError(
+                ERROR_PERMISSION_REVOKED,
+                "Location permission was revoked while tracking was paused. Please grant permission to resume."
+            )
+        } catch (e: Exception) {
+            emitError("GPS_RESUME_FAILED", "Failed to resume tracking after GPS enabled: ${e.message}")
         }
     }
 
@@ -470,28 +624,38 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
 
     /**
      * Distance/Time Matrix filter.
-     * Accepts location only if BOTH conditions are met:
-     * - Time since last update >= intervalMs
-     * - Distance from last location >= distanceFilterMeters
+     * Accepts location based on the configured optimization mode:
+     * - 'interval': time since last update >= intervalMs
+     * - 'distance': distance from last location >= distanceFilterMeters
+     * - 'both': both conditions must be met (default)
      *
      * First location is always accepted.
+     * Invalid locations (accuracy < 0 or coordinate 0,0) are rejected.
      */
     private fun shouldAcceptLocation(newLocation: Location): Boolean {
+        // Reject invalid coordinates
+        if (newLocation.latitude == 0.0 && newLocation.longitude == 0.0) {
+            return false
+        }
+        if (newLocation.accuracy < 0) {
+            return false
+        }
+
         val last = lastLocation ?: return true // First location always accepted
 
         // Check time condition
         val timeDiff = System.currentTimeMillis() - lastUpdateTimestamp
-        if (timeDiff < intervalMs) {
-            return false
-        }
+        val timeMet = timeDiff >= intervalMs
 
         // Check distance condition
         val distance = last.distanceTo(newLocation)
-        if (distance < distanceFilterMeters) {
-            return false
-        }
+        val distanceMet = distance >= distanceFilterMeters
 
-        return true
+        return when (optimizationMode) {
+            "interval" -> timeMet
+            "distance" -> distanceMet
+            else -> timeMet && distanceMet
+        }
     }
 
     /**

@@ -215,6 +215,7 @@ firebase: {
 | `optimization.intervalMs` | number | 10000 | Minimum interval between updates (ms) |
 | `optimization.distanceFilterMeters` | number | 10 | Minimum distance to trigger update (meters) |
 | `optimization.stopWhenStill` | boolean | true | Enable Motion Sleep Mode |
+| `optimization.mode` | `'interval' \| 'distance' \| 'both'` | `'both'` | Filter strategy: time only, distance only, or both |
 
 ### Firebase
 
@@ -236,17 +237,40 @@ firebase: {
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `androidNotification.title` | string | — | Foreground service notification title |
-| `androidNotification.text` | string | — | Notification text |
+| `androidNotification.enabled` | boolean | `true` | Show the foreground service notification |
+| `androidNotification.title` | string | — | Foreground service notification title (required when enabled) |
+| `androidNotification.text` | string | — | Notification text (required when enabled) |
 | `androidNotification.icon` | string? | — | Icon resource name |
 | `androidNotification.channelId` | string? | — | Notification channel ID |
+| `androidNotification.channelName` | string? | — | Notification channel name |
+
+> **Note:** Android requires a foreground service notification to run background tracking. When `enabled: false`, the service still runs but shows a minimal default notification.
+
+### iOS Notification
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `iosNotification.enabled` | boolean | `true` | Show the persistent local notification |
+| `iosNotification.title` | string | — | Notification title (required when enabled) |
+| `iosNotification.text` | string | — | Notification body (required when enabled) |
 
 ## How It Works
 
-### Distance/Time Matrix (AND logic)
-Location updates are only sent when **BOTH** conditions are met:
-- Time since last update ≥ `intervalMs`
-- Distance from last location ≥ `distanceFilterMeters`
+### Distance/Time Matrix
+The filtering strategy is controlled by `optimization.mode`:
+
+| Mode | Behavior |
+|------|----------|
+| `both` (default) | Update only when **both** time and distance conditions are met |
+| `interval` | Update only when time since last update ≥ `intervalMs` |
+| `distance` | Update only when distance from last location ≥ `distanceFilterMeters` |
+
+### GPS Disabled During Tracking
+The library monitors GPS/location service status. If GPS is disabled while tracking is active:
+- Tracking is automatically paused
+- An `onError` event with code `GPS_DISABLED` is emitted
+- When GPS is re-enabled, tracking automatically resumes
+- A `GPS_ENABLED` event is emitted on resume
 
 ### Motion Sleep Mode
 When `stopWhenStill: true` and device is stationary for > 3 minutes:
@@ -356,11 +380,16 @@ Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 |------|-------------|
 | `PERMISSION_DENIED` | Location permission not granted |
 | `GPS_DISABLED` | GPS/Location services turned off |
+| `GPS_ENABLED` | GPS/Location services turned back on (auto-resume) |
+| `PERMISSION_REVOKED` | Permission revoked while tracking was paused |
 | `INVALID_CONFIG` | Invalid configuration parameters |
 | `NOT_CONFIGURED` | Method called before `configure()` |
 | `FIREBASE_WRITE_FAILED` | Firebase write failed after max retries |
 | `DEPRECATED_FIELD` | Using old config fields (currentLocationPath/historyPath) |
 | `QUEUE_OVERFLOW` | Offline queue reached 10,000 cap (oldest evicted) |
+| `LOCATION_UNKNOWN` | Location temporarily unavailable |
+| `NETWORK_ERROR` | Location network error |
+| `LOCATION_ERROR` | Generic location update failure |
 
 ## License
 

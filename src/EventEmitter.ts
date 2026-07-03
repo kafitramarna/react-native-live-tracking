@@ -7,29 +7,19 @@
  * @packageDocumentation
  */
 
-import { NativeEventEmitter } from 'react-native';
+import { DeviceEventEmitter } from 'react-native';
 import type { LocationData, TrackingError, Subscription } from './types';
 
 /**
- * Lazily-created NativeEventEmitter for the LiveTracking native module.
+ * Directly use the global device event emitter.
  *
- * We intentionally do NOT pass the native module instance to NativeEventEmitter
- * constructor. Passing a module triggers RN to validate addListener/removeListeners
- * via PlatformConstants at instantiation time, which crashes in Bridgeless mode
- * before the TurboModule registry is fully initialised.
- *
- * Since LiveTracking.swift implements addListener/removeListeners on the native
- * side, events are still delivered correctly — the constructor argument is only
- * used by RN's legacy bridge to call those methods automatically.
+ * NativeEventEmitter's constructor accesses Platform.OS, which requires the
+ * PlatformConstants native module. In a broken or partially-initialised binary
+ * that module can be missing and crash the app before we can even report that
+ * LiveTracking is unavailable. DeviceEventEmitter avoids that dependency
+ * entirely while still delivering native events emitted by the LiveTracking
+ * RCTEventEmitter.
  */
-let _emitter: NativeEventEmitter | null = null;
-
-function getEmitter(): NativeEventEmitter {
-  if (!_emitter) {
-    _emitter = new NativeEventEmitter();
-  }
-  return _emitter;
-}
 
 /**
  * Register a callback for location updates.
@@ -52,7 +42,7 @@ function getEmitter(): NativeEventEmitter {
 export function onLocationUpdate(
   callback: (location: LocationData) => void
 ): Subscription {
-  const nativeSubscription = getEmitter().addListener(
+  const nativeSubscription = DeviceEventEmitter.addListener(
     'onLocationUpdate',
     (event: Record<string, unknown>) => {
       const location: LocationData = {
@@ -96,7 +86,7 @@ export function onLocationUpdate(
 export function onError(
   callback: (error: TrackingError) => void
 ): Subscription {
-  const nativeSubscription = getEmitter().addListener(
+  const nativeSubscription = DeviceEventEmitter.addListener(
     'onTrackingError',
     (event: Record<string, unknown>) => {
       const error: TrackingError = {
@@ -123,6 +113,6 @@ export function onError(
  * or when all subscriptions need to be cleared at once.
  */
 export function removeAllListeners(): void {
-  getEmitter().removeAllListeners('onLocationUpdate');
-  getEmitter().removeAllListeners('onTrackingError');
+  DeviceEventEmitter.removeAllListeners('onLocationUpdate');
+  DeviceEventEmitter.removeAllListeners('onTrackingError');
 }

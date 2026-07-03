@@ -69,8 +69,11 @@ class LocationEngine(context: Context) {
      */
     @Throws(SecurityException::class)
     fun startLocationUpdates(intervalMs: Long, distanceFilter: Float, priority: Int) {
+        // When distanceFilter is 0 or negative, disable distance filtering entirely
+        // so FusedLocationProvider delivers updates purely on interval
+        val effectiveDistanceFilter = if (distanceFilter <= 0f) 0f else distanceFilter
         val locationRequest = LocationRequest.Builder(priority, intervalMs)
-            .setMinUpdateDistanceMeters(distanceFilter)
+            .setMinUpdateDistanceMeters(effectiveDistanceFilter)
             .setWaitForAccurateLocation(false)
             .build()
 

@@ -35,10 +35,12 @@ class LiveTracking: RCTEventEmitter {
         case configured
         case tracking
         case motionSleep = "motion_sleep"
+        case pausedGps = "paused_gps"
     }
 
     private var state: TrackingState = .idle
     private var hasListeners: Bool = false
+    private var wasTrackingBeforeGpsDisabled: Bool = false
 
     // MARK: - Engines
 
@@ -56,8 +58,16 @@ class LiveTracking: RCTEventEmitter {
     private var intervalMs: Int = 10000
     private var distanceFilterMeters: Double = 10.0
     private var stopWhenStill: Bool = true
+    private var optimizationMode: String = "both"
+    private var iosNotificationEnabled: Bool = true
     private var iosNotificationTitle: String?
     private var iosNotificationText: String?
+
+    // MARK: - Error Codes
+
+    private static let ERROR_GPS_DISABLED = "GPS_DISABLED"
+    private static let ERROR_GPS_ENABLED = "GPS_ENABLED"
+    private static let ERROR_PERMISSION_REVOKED = "PERMISSION_REVOKED"
 
     // MARK: - Tracking State
 
@@ -84,6 +94,10 @@ class LiveTracking: RCTEventEmitter {
     }
 
     override func stopObserving() {
+        // Do not disable event emission while tracking is active
+        if state == .tracking || state == .motionSleep {
+            return
+        }
         hasListeners = false
     }
 
@@ -139,19 +153,26 @@ class LiveTracking: RCTEventEmitter {
             ?? (optimizationConfig?["distanceFilterMeters"] as? Int).map { Double($0) }
             ?? 10.0
         let parsedStopWhenStill = optimizationConfig?["stopWhenStill"] as? Bool ?? true
+        let parsedOptimizationMode = optimizationConfig?["mode"] as? String ?? "both"
 
         // Validate values
-        if parsedIntervalMs < 0 {
-            reject("INVALID_CONFIG", "optimization.intervalMs must be non-negative", nil)
+        if parsedIntervalMs <= 0 {
+            reject("INVALID_CONFIG", "optimization.intervalMs must be greater than 0", nil)
             return
         }
-        if parsedDistanceFilter < 0 {
-            reject("INVALID_CONFIG", "optimization.distanceFilterMeters must be non-negative", nil)
+        if parsedDistanceFilter <= 0 {
+            reject("INVALID_CONFIG", "optimization.distanceFilterMeters must be greater than 0", nil)
+            return
+        }
+        let validModes = ["interval", "distance", "both"]
+        if !validModes.contains(parsedOptimizationMode) {
+            reject("INVALID_CONFIG", "optimization.mode must be 'interval', 'distance', or 'both'", nil)
             return
         }
 
         // Parse iosNotification config (optional)
         if let iosNotificationConfig = json["iosNotification"] as? [String: Any] {
+            self.iosNotificationEnabled = iosNotificationConfig["enabled"] as? Bool ?? true
             self.iosNotificationTitle = iosNotificationConfig["title"] as? String
             self.iosNotificationText = iosNotificationConfig["text"] as? String
         }
@@ -160,6 +181,7 @@ class LiveTracking: RCTEventEmitter {
         self.intervalMs = parsedIntervalMs
         self.distanceFilterMeters = parsedDistanceFilter
         self.stopWhenStill = parsedStopWhenStill
+        self.optimizationMode = parsedOptimizationMode
 
         // Initialize network listener first (needed by SyncEngineController)
         self.networkListener = NetworkListener()
@@ -225,7 +247,11 @@ class LiveTracking: RCTEventEmitter {
      */
     @objc
     func start(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        guard state == .configured || state == .tracking else {
+        guard state == .configured || state == .pausedGps else {
+            if state == .tracking || state == .motionSleep {
+                resolve(nil)
+                return
+            }
             reject("NOT_CONFIGURED", "Library must be configured before starting. Call configure() first.", nil)
             return
         }
@@ -239,38 +265,40 @@ class LiveTracking: RCTEventEmitter {
         let permissionResult = permissionHandler.checkAllRequirements()
         switch permissionResult {
         case .granted:
+            // Log actual authorization level and upgrade to Always if needed
+            let authStatus = locationEngine?.getAuthorizationStatus() ?? .notDetermined
+            print("[LiveTracking] Permission granted — authorizationStatus: \(authStatus.rawValue) (3=whenInUse, 4=always)")
+            if authStatus == .authorizedWhenInUse {
+                print("[LiveTracking] Requesting Always authorization for background tracking...")
+                locationEngine?.requestAlwaysAuthorization()
+            }
             break
         case .denied(let errorCode, let message):
             reject(errorCode, message, nil)
             return
         }
 
-        guard let locationEngine = self.locationEngine else {
-            reject("NOT_CONFIGURED", "Location engine not initialized. Call configure() first.", nil)
-            return
-        }
-
-        // Show persistent notification if configured
-        if let title = iosNotificationTitle, let text = iosNotificationText {
+        // Show persistent notification if enabled and configured
+        if iosNotificationEnabled,
+           let title = iosNotificationTitle,
+           let text = iosNotificationText {
             TrackingNotificationManager.shared.configure(title: title, body: text)
             TrackingNotificationManager.shared.showTrackingNotification()
         }
 
-        // Start location engine
-        locationEngine.startLocationUpdates(intervalMs: intervalMs, distanceFilter: distanceFilterMeters)
+        // Ensure events are emitted to JS regardless of listener timing
+        hasListeners = true
 
-        // Start activity recognition for motion sleep mode
-        activityRecognitionHandler?.startActivityRecognition()
+        // Start tracking engines
+        startTrackingEngines()
 
-        // Start network listener for queue flush
-        networkListener?.startListening()
-
-        // Start significant location monitoring as fallback
-        let clManager = CLLocationManager()
-        BackgroundModeHelper.shared.startSignificantLocationMonitoring(locationManager: clManager)
-
-        // Mark tracking active
-        trackingCleanup?.markTrackingActive(locationManager: clManager)
+        // Monitor app becoming active to detect GPS status changes
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppBecameActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
 
         // Reset last update tracking
         lastUpdateTime = nil
@@ -293,7 +321,7 @@ class LiveTracking: RCTEventEmitter {
      */
     @objc
     func stop(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
-        guard state == .tracking || state == .motionSleep else {
+        guard state == .tracking || state == .motionSleep || state == .pausedGps else {
             // Already stopped, resolve silently
             resolve(nil)
             return
@@ -309,31 +337,147 @@ class LiveTracking: RCTEventEmitter {
                 return
             }
 
-            // Stop location engine and significant location monitoring
-            if let locationEngine = self.locationEngine {
-                let clManager = CLLocationManager()
-                self.trackingCleanup?.stopAllTracking(
-                    locationEngine: locationEngine,
-                    backgroundHelper: BackgroundModeHelper.shared,
-                    locationManager: clManager
-                )
-            }
-
-            // Stop activity recognition
-            self.activityRecognitionHandler?.stopActivityRecognition()
-
-            // Stop network listener
-            self.networkListener?.stopListening()
+            // Stop tracking engines
+            self.stopTrackingEngines()
 
             // Cleanup
             self.trackingCleanup?.cleanup()
 
+            // Remove app lifecycle observer
+            NotificationCenter.default.removeObserver(
+                self,
+                name: UIApplication.didBecomeActiveNotification,
+                object: nil
+            )
+
             // Reset state
             self.lastLocation = nil
             self.lastUpdateTime = nil
+            self.wasTrackingBeforeGpsDisabled = false
             self.state = .configured
+            self.hasListeners = false
 
             resolve(nil)
+        }
+    }
+
+    /**
+     * Start location engine, activity recognition, network listener, and significant location monitoring.
+     */
+    private func startTrackingEngines() {
+        guard let locationEngine = self.locationEngine else { return }
+
+        // Start location engine
+        // When mode is 'interval', use kCLDistanceFilterNone so iOS OS delivers every GPS update.
+        // Distance filtering for 'distance'/'both' modes is handled at app level in shouldProcessLocation.
+        let clDistanceFilter: Double = (optimizationMode == "interval") ? kCLDistanceFilterNone : distanceFilterMeters
+        locationEngine.startLocationUpdates(intervalMs: intervalMs, distanceFilter: clDistanceFilter)
+
+        // Start activity recognition for motion sleep mode
+        activityRecognitionHandler?.startActivityRecognition()
+
+        // Start network listener for queue flush
+        networkListener?.startListening()
+
+        // Start significant location monitoring as fallback
+        let clManager = CLLocationManager()
+        if CLLocationManager.significantLocationChangeMonitoringAvailable() {
+            BackgroundModeHelper.shared.startSignificantLocationMonitoring(locationManager: clManager)
+        }
+
+        // Mark tracking active
+        trackingCleanup?.markTrackingActive(locationManager: clManager)
+    }
+
+    /**
+     * Stop location engine, activity recognition, network listener, and significant location monitoring.
+     */
+    private func stopTrackingEngines() {
+        // Stop location engine and significant location monitoring
+        if let locationEngine = self.locationEngine {
+            let clManager = CLLocationManager()
+            self.trackingCleanup?.stopAllTracking(
+                locationEngine: locationEngine,
+                backgroundHelper: BackgroundModeHelper.shared,
+                locationManager: clManager
+            )
+        }
+
+        // Stop activity recognition
+        self.activityRecognitionHandler?.stopActivityRecognition()
+
+        // Stop network listener
+        self.networkListener?.stopListening()
+    }
+
+    /**
+     * Called when the app becomes active. Used to detect GPS/location services status changes.
+     */
+    @objc
+    private func handleAppBecameActive() {
+        checkGpsStatus()
+    }
+
+    /**
+     * Check current GPS/location services status and pause/resume tracking accordingly.
+     */
+    private func checkGpsStatus() {
+        guard let permissionHandler = self.permissionHandler else { return }
+
+        let gpsEnabled: Bool
+        switch permissionHandler.checkLocationServicesEnabled() {
+        case .granted:
+            gpsEnabled = true
+        case .denied:
+            gpsEnabled = false
+        }
+
+        if !gpsEnabled && (state == .tracking || state == .motionSleep) {
+            pauseTrackingDueToGps()
+        } else if gpsEnabled && state == .pausedGps && wasTrackingBeforeGpsDisabled {
+            resumeTrackingAfterGps()
+        }
+    }
+
+    /**
+     * Pause tracking when GPS/location services are disabled while tracking is active.
+     */
+    private func pauseTrackingDueToGps() {
+        wasTrackingBeforeGpsDisabled = true
+        stopTrackingEngines()
+        state = .pausedGps
+        emitErrorEvent(
+            errorCode: LiveTracking.ERROR_GPS_DISABLED,
+            message: "GPS/Location services were disabled. Tracking paused and will resume automatically when GPS is enabled."
+        )
+    }
+
+    /**
+     * Resume tracking after GPS/location services are re-enabled.
+     */
+    private func resumeTrackingAfterGps() {
+        guard let permissionHandler = self.permissionHandler else { return }
+
+        let permissionResult = permissionHandler.checkAllRequirements()
+        switch permissionResult {
+        case .granted:
+            startTrackingEngines()
+            state = .tracking
+            emitErrorEvent(
+                errorCode: LiveTracking.ERROR_GPS_ENABLED,
+                message: "GPS/Location services are enabled. Tracking resumed."
+            )
+        case .denied(let errorCode, let message):
+            state = .configured
+            wasTrackingBeforeGpsDisabled = false
+            emitErrorEvent(
+                errorCode: errorCode == PermissionHandler.ERROR_PERMISSION_DENIED
+                    ? LiveTracking.ERROR_PERMISSION_REVOKED
+                    : errorCode,
+                message: errorCode == PermissionHandler.ERROR_PERMISSION_DENIED
+                    ? "Location permission was revoked while tracking was paused. Please grant permission to resume."
+                    : message
+            )
         }
     }
 
@@ -434,27 +578,53 @@ class LiveTracking: RCTEventEmitter {
 
     /**
      * Apply distance/time filter to determine if a location update should be processed.
-     * Both conditions must be met: time elapsed >= intervalMs AND distance >= distanceFilterMeters.
+     * The filtering strategy depends on optimizationMode:
+     * - 'interval': time elapsed >= intervalMs
+     * - 'distance': distance >= distanceFilterMeters
+     * - 'both': both conditions must be met (default)
+     *
+     * Invalid locations (coordinate 0,0 or negative accuracy) are rejected.
      */
     private func shouldProcessLocation(_ location: CLLocation) -> Bool {
+        print("[LiveTracking] 📥 Raw location received: lat=\(location.coordinate.latitude) lon=\(location.coordinate.longitude) acc=\(location.horizontalAccuracy) ts=\(Int64(location.timestamp.timeIntervalSince1970 * 1000))")
+
+        // Reject invalid coordinates
+        if location.coordinate.latitude == 0.0 && location.coordinate.longitude == 0.0 {
+            print("[LiveTracking] ❌ Rejected: invalid coordinates (0,0)")
+            return false
+        }
+        if location.horizontalAccuracy < 0 {
+            print("[LiveTracking] ❌ Rejected: negative accuracy")
+            return false
+        }
+
         guard let lastLoc = lastLocation, let lastTime = lastUpdateTime else {
-            // First location always passes
+            print("[LiveTracking] ✅ Accepted: first location")
             return true
         }
 
-        // Check time filter
+        // Check time filter using GPS timestamp — iOS batches deliveries so wall-clock time is unreliable
         let timeDiffMs = Int(location.timestamp.timeIntervalSince(lastTime) * 1000)
-        if timeDiffMs < intervalMs {
-            return false
-        }
+        let timeMet = timeDiffMs >= intervalMs
 
         // Check distance filter
         let distance = location.distance(from: lastLoc)
-        if distance < distanceFilterMeters {
-            return false
-        }
+        let distanceMet = distance >= distanceFilterMeters
 
-        return true
+        print("[LiveTracking] 🔍 Filter check — mode=\(optimizationMode) timeDiffMs=\(timeDiffMs)/\(intervalMs) distance=\(String(format: "%.1f", distance))m timeMet=\(timeMet) distanceMet=\(distanceMet)")
+
+        switch optimizationMode {
+        case "interval":
+            if timeMet { print("[LiveTracking] ✅ Accepted: interval") } else { print("[LiveTracking] ⏳ Skipped: interval not met") }
+            return timeMet
+        case "distance":
+            if distanceMet { print("[LiveTracking] ✅ Accepted: distance") } else { print("[LiveTracking] ⏳ Skipped: distance not met") }
+            return distanceMet
+        default:
+            let result = timeMet && distanceMet
+            if result { print("[LiveTracking] ✅ Accepted: both") } else { print("[LiveTracking] ⏳ Skipped: both not met") }
+            return result
+        }
     }
 
     /**
@@ -493,6 +663,7 @@ class LiveTracking: RCTEventEmitter {
             bearing: location.course >= 0 ? location.course : nil
         )
 
+        print("[LiveTracking] 🚀 Dispatching to Firebase — lat=\(location.coordinate.latitude) lon=\(location.coordinate.longitude) ts=\(Int64(location.timestamp.timeIntervalSince1970 * 1000))")
         syncEngineController?.dispatchLocation(dataPoint)
     }
 
@@ -543,6 +714,10 @@ extension LiveTracking: LocationUpdateDelegate {
         if shouldProcessLocation(location) {
             processLocationUpdate(location)
         }
+    }
+
+    func onLocationError(errorCode: String, message: String) {
+        emitErrorEvent(errorCode: errorCode, message: message)
     }
 }
 

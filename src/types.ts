@@ -14,9 +14,18 @@ export enum TrackingState {
   CONFIGURED = 'configured',
   TRACKING = 'tracking',
   MOTION_SLEEP = 'motion_sleep',
+  PAUSED_GPS = 'paused_gps',
 }
 
 // ─── Configuration Interfaces ────────────────────────────────────────────────
+
+/**
+ * Strategy used by the distance/time filter.
+ * - 'interval': accept when enough time has elapsed
+ * - 'distance': accept when enough distance has been covered
+ * - 'both': accept only when both conditions are met (default)
+ */
+export type OptimizationMode = 'interval' | 'distance' | 'both';
 
 /**
  * Optimization parameters for location tracking.
@@ -28,12 +37,16 @@ export interface OptimizationConfig {
   distanceFilterMeters?: number;
   /** Whether to reduce GPS accuracy when device is still. Default: true */
   stopWhenStill?: boolean;
+  /** Filter strategy: 'interval', 'distance', or 'both'. Default: 'both' */
+  mode?: OptimizationMode;
 }
 
 /**
  * Android foreground service notification configuration.
  */
 export interface AndroidNotificationConfig {
+  /** Whether to show the foreground service notification. Default: true */
+  enabled?: boolean;
   /** Notification title */
   title: string;
   /** Notification body text */
@@ -51,6 +64,8 @@ export interface AndroidNotificationConfig {
  * Shows a local notification while tracking is active (similar to Android's foreground service notification).
  */
 export interface IOSNotificationConfig {
+  /** Whether to show the persistent local notification. Default: true */
+  enabled?: boolean;
   /** Notification title */
   title: string;
   /** Notification body text */

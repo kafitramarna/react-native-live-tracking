@@ -15,6 +15,9 @@ import type {
 const DEFAULT_INTERVAL_MS = 10000;
 const DEFAULT_DISTANCE_FILTER_METERS = 10;
 const DEFAULT_STOP_WHEN_STILL = true;
+const DEFAULT_MODE: 'interval' | 'distance' | 'both' = 'both';
+
+const VALID_OPTIMIZATION_MODES = ['interval', 'distance', 'both'] as const;
 
 // ─── Validation Constants ────────────────────────────────────────────────────
 
@@ -88,6 +91,7 @@ export function applyDefaults(config: TrackingConfig): TrackingConfig {
         config.optimization.distanceFilterMeters ?? DEFAULT_DISTANCE_FILTER_METERS,
       stopWhenStill:
         config.optimization.stopWhenStill ?? DEFAULT_STOP_WHEN_STILL,
+      mode: config.optimization.mode ?? DEFAULT_MODE,
     },
     firebase: {
       service: config.firebase.service,
@@ -166,6 +170,20 @@ function validateOptimization(
         field: 'optimization.stopWhenStill',
         message: 'stopWhenStill must be a boolean',
         code: 'INVALID_TYPE',
+      });
+    }
+  }
+
+  // mode (optional, but if provided must be 'interval', 'distance', or 'both')
+  if (opt['mode'] !== undefined) {
+    if (
+      typeof opt['mode'] !== 'string' ||
+      !(VALID_OPTIMIZATION_MODES as readonly string[]).includes(opt['mode'] as string)
+    ) {
+      errors.push({
+        field: 'optimization.mode',
+        message: `optimization.mode must be 'interval', 'distance', or 'both'`,
+        code: 'INVALID_VALUE',
       });
     }
   }
@@ -440,28 +458,42 @@ function validateAndroidNotification(
 
   const notif = notification as Record<string, unknown>;
 
-  // title (required, non-empty string)
-  if (
-    typeof notif['title'] !== 'string' ||
-    (notif['title'] as string).trim().length === 0
-  ) {
+  // enabled (optional, but if provided must be boolean)
+  if (notif['enabled'] !== undefined && typeof notif['enabled'] !== 'boolean') {
     errors.push({
-      field: 'androidNotification.title',
-      message: 'androidNotification.title must be a non-empty string',
-      code: 'REQUIRED_FIELD',
+      field: 'androidNotification.enabled',
+      message: 'androidNotification.enabled must be a boolean',
+      code: 'INVALID_TYPE',
     });
   }
 
-  // text (required, non-empty string)
-  if (
-    typeof notif['text'] !== 'string' ||
-    (notif['text'] as string).trim().length === 0
-  ) {
-    errors.push({
-      field: 'androidNotification.text',
-      message: 'androidNotification.text must be a non-empty string',
-      code: 'REQUIRED_FIELD',
-    });
+  const isEnabled = notif['enabled'] !== false;
+
+  // title and text are only required when notification is enabled
+  if (isEnabled) {
+    // title (required, non-empty string)
+    if (
+      typeof notif['title'] !== 'string' ||
+      (notif['title'] as string).trim().length === 0
+    ) {
+      errors.push({
+        field: 'androidNotification.title',
+        message: 'androidNotification.title must be a non-empty string',
+        code: 'REQUIRED_FIELD',
+      });
+    }
+
+    // text (required, non-empty string)
+    if (
+      typeof notif['text'] !== 'string' ||
+      (notif['text'] as string).trim().length === 0
+    ) {
+      errors.push({
+        field: 'androidNotification.text',
+        message: 'androidNotification.text must be a non-empty string',
+        code: 'REQUIRED_FIELD',
+      });
+    }
   }
 }
 
@@ -480,27 +512,41 @@ function validateIOSNotification(
 
   const notif = notification as Record<string, unknown>;
 
-  // title (required, non-empty string)
-  if (
-    typeof notif['title'] !== 'string' ||
-    (notif['title'] as string).trim().length === 0
-  ) {
+  // enabled (optional, but if provided must be boolean)
+  if (notif['enabled'] !== undefined && typeof notif['enabled'] !== 'boolean') {
     errors.push({
-      field: 'iosNotification.title',
-      message: 'iosNotification.title must be a non-empty string',
-      code: 'REQUIRED_FIELD',
+      field: 'iosNotification.enabled',
+      message: 'iosNotification.enabled must be a boolean',
+      code: 'INVALID_TYPE',
     });
   }
 
-  // text (required, non-empty string)
-  if (
-    typeof notif['text'] !== 'string' ||
-    (notif['text'] as string).trim().length === 0
-  ) {
-    errors.push({
-      field: 'iosNotification.text',
-      message: 'iosNotification.text must be a non-empty string',
-      code: 'REQUIRED_FIELD',
-    });
+  const isEnabled = notif['enabled'] !== false;
+
+  // title and text are only required when notification is enabled
+  if (isEnabled) {
+    // title (required, non-empty string)
+    if (
+      typeof notif['title'] !== 'string' ||
+      (notif['title'] as string).trim().length === 0
+    ) {
+      errors.push({
+        field: 'iosNotification.title',
+        message: 'iosNotification.title must be a non-empty string',
+        code: 'REQUIRED_FIELD',
+      });
+    }
+
+    // text (required, non-empty string)
+    if (
+      typeof notif['text'] !== 'string' ||
+      (notif['text'] as string).trim().length === 0
+    ) {
+      errors.push({
+        field: 'iosNotification.text',
+        message: 'iosNotification.text must be a non-empty string',
+        code: 'REQUIRED_FIELD',
+      });
+    }
   }
 }

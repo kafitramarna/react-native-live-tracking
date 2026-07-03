@@ -126,6 +126,36 @@ describe('validateConfig', () => {
     ).toBe(true);
   });
 
+  it('valid optimization mode passes validation', () => {
+    const modes = ['interval', 'distance', 'both'];
+    for (const mode of modes) {
+      const config = {
+        optimization: { mode },
+        firebase: {
+          service: 'RTDB',
+          targets: [{ path: '/users/user1/location', method: 'set' }],
+        },
+      };
+      const result = validateConfig(config);
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('invalid optimization mode returns error', () => {
+    const config = {
+      optimization: { mode: 'invalid' },
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some((e) => e.field === 'optimization.mode')
+    ).toBe(true);
+  });
+
   it('config with single target is valid', () => {
     const config = {
       optimization: {},
@@ -392,6 +422,76 @@ describe('validateConfig', () => {
     ).toBe(true);
   });
 
+  it('androidNotification disabled does not require title/text', () => {
+    const config = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      androidNotification: {
+        enabled: false,
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it('androidNotification enabled with empty title still returns error', () => {
+    const config = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      androidNotification: {
+        enabled: true,
+        title: '',
+        text: 'Tracking your location',
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some((e) => e.field === 'androidNotification.title')
+    ).toBe(true);
+  });
+
+  it('iosNotification disabled does not require title/text', () => {
+    const config = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      iosNotification: {
+        enabled: false,
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it('iosNotification enabled with empty title returns error', () => {
+    const config = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      iosNotification: {
+        enabled: true,
+        title: '',
+        text: 'Tracking your location',
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(
+      result.errors.some((e) => e.field === 'iosNotification.title')
+    ).toBe(true);
+  });
+
   // ─── Deprecated Field Detection ──────────────────────────────────────────────
 
   it('currentLocationPath in firebase object returns DEPRECATED_FIELD error', () => {
@@ -497,6 +597,7 @@ describe('applyDefaults', () => {
     expect(result.optimization.intervalMs).toBe(10000);
     expect(result.optimization.distanceFilterMeters).toBe(10);
     expect(result.optimization.stopWhenStill).toBe(true);
+    expect(result.optimization.mode).toBe('both');
   });
 
   it('preserves explicitly set values', () => {
@@ -520,7 +621,24 @@ describe('applyDefaults', () => {
     expect(result.optimization.intervalMs).toBe(5000);
     expect(result.optimization.distanceFilterMeters).toBe(20);
     expect(result.optimization.stopWhenStill).toBe(false);
+    expect(result.optimization.mode).toBe('both');
     expect(result.firebase.targets).toHaveLength(2);
+  });
+
+  it('preserves explicitly set optimization mode', () => {
+    const config: TrackingConfig = {
+      optimization: {
+        mode: 'distance',
+      },
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+    };
+
+    const result = applyDefaults(config);
+
+    expect(result.optimization.mode).toBe('distance');
   });
 
   it('passes targets through without modification', () => {

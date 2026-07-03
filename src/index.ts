@@ -17,7 +17,9 @@ export { TrackingState } from './types';
 export type {
   SyncTarget,
   OptimizationConfig,
+  OptimizationMode,
   AndroidNotificationConfig,
+  IOSNotificationConfig,
   FirebaseConfig,
   TrackingConfig,
   LocationData,

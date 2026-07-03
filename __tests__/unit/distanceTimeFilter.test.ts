@@ -82,6 +82,78 @@ describe('shouldAcceptLocation', () => {
     const result = shouldAcceptLocation(baseLocation, newLocation, config);
     expect(result).toBe(false);
   });
+
+  it('interval mode accepts when time condition met even if distance is not met', () => {
+    const newLocation: LocationData = {
+      latitude: -6.20881,
+      longitude: 106.84561,
+      timestamp: 1700000015000,
+      accuracy: 5,
+      speed: 0.1,
+      altitude: null,
+      bearing: null,
+    };
+
+    const result = shouldAcceptLocation(baseLocation, newLocation, {
+      ...config,
+      mode: 'interval',
+    });
+    expect(result).toBe(true);
+  });
+
+  it('interval mode rejects when time condition is not met', () => {
+    const newLocation: LocationData = {
+      latitude: -6.21,
+      longitude: 106.85,
+      timestamp: 1700000005000,
+      accuracy: 5,
+      speed: 10,
+      altitude: null,
+      bearing: null,
+    };
+
+    const result = shouldAcceptLocation(baseLocation, newLocation, {
+      ...config,
+      mode: 'interval',
+    });
+    expect(result).toBe(false);
+  });
+
+  it('distance mode accepts when distance condition met even if time is not met', () => {
+    const newLocation: LocationData = {
+      latitude: -6.21,
+      longitude: 106.85,
+      timestamp: 1700000005000,
+      accuracy: 5,
+      speed: 10,
+      altitude: null,
+      bearing: null,
+    };
+
+    const result = shouldAcceptLocation(baseLocation, newLocation, {
+      ...config,
+      mode: 'distance',
+    });
+    expect(result).toBe(true);
+  });
+
+  it('distance mode rejects when distance condition is not met', () => {
+    const newLocation: LocationData = {
+      latitude: -6.20881,
+      longitude: 106.84561,
+      timestamp: 1700000015000,
+      accuracy: 5,
+      speed: 0.1,
+      altitude: null,
+      bearing: null,
+    };
+
+    const result = shouldAcceptLocation(baseLocation, newLocation, {
+      ...config,
+      mode: 'distance',
+    });
+    expect(result).toBe(false);
+  });
 });
 
 describe('calculateDistance', () => {
