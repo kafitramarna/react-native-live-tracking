@@ -28,6 +28,11 @@ class LiveTrackingModule(reactContext: ReactApplicationContext) :
 
     override fun getName(): String = NAME
 
+    override fun invalidate() {
+        impl.onCatalystDestroyed()
+        super.invalidate()
+    }
+
     @ReactMethod
     fun configure(config: String, promise: Promise) {
         impl.configure(config, promise)

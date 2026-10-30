@@ -232,6 +232,78 @@ class BootReceiverTest {
         }
     }
 
+    // --- Config persistence tests ---
+
+    @Test
+    fun `saveConfig persists JSON under config_json key`() {
+        every { mockEditor.putString(any(), any()) } returns mockEditor
+
+        val json = """{"optimization":{"intervalMs":120000}}"""
+        TrackingStateStore.saveConfig(mockContext, json)
+
+        verify(exactly = 1) { mockEditor.putString("config_json", json) }
+        verify(exactly = 1) { mockEditor.apply() }
+    }
+
+    @Test
+    fun `loadConfig returns saved JSON`() {
+        val json = """{"optimization":{"intervalMs":120000}}"""
+        every { mockSharedPreferences.getString("config_json", null) } returns json
+
+        assertEquals(json, TrackingStateStore.loadConfig(mockContext))
+    }
+
+    @Test
+    fun `loadConfig returns null when never saved`() {
+        every { mockSharedPreferences.getString("config_json", null) } returns null
+
+        assertNull(TrackingStateStore.loadConfig(mockContext))
+    }
+
+    // --- One-shot marker tests ---
+
+    @Test
+    fun `saveLastStopReason persists reason under last_stop_reason key`() {
+        every { mockEditor.putString(any(), any()) } returns mockEditor
+
+        TrackingStateStore.saveLastStopReason(mockContext, "remote_status")
+
+        verify(exactly = 1) { mockEditor.putString("last_stop_reason", "remote_status") }
+        verify(exactly = 1) { mockEditor.apply() }
+    }
+
+    @Test
+    fun `consumeLastStopReason returns and clears stored reason`() {
+        every { mockSharedPreferences.getString("last_stop_reason", null) } returns "remote_status"
+        every { mockEditor.remove(any()) } returns mockEditor
+
+        val reason = TrackingStateStore.consumeLastStopReason(mockContext)
+
+        assertEquals("remote_status", reason)
+        verify(exactly = 1) { mockEditor.remove("last_stop_reason") }
+        verify(exactly = 1) { mockEditor.apply() }
+    }
+
+    @Test
+    fun `consumeLastStopReason returns null and does not clear when empty`() {
+        every { mockSharedPreferences.getString("last_stop_reason", null) } returns null
+
+        assertNull(TrackingStateStore.consumeLastStopReason(mockContext))
+        verify(exactly = 0) { mockEditor.remove("last_stop_reason") }
+    }
+
+    @Test
+    fun `consumeLastRestartReason returns and clears stored reason`() {
+        every { mockSharedPreferences.getString("last_restart_reason", null) } returns "sticky_restart"
+        every { mockEditor.remove(any()) } returns mockEditor
+
+        val reason = TrackingStateStore.consumeLastRestartReason(mockContext)
+
+        assertEquals("sticky_restart", reason)
+        verify(exactly = 1) { mockEditor.remove("last_restart_reason") }
+        verify(exactly = 1) { mockEditor.apply() }
+    }
+
     /*
      * ============================================================================
      * NOTE: The following tests require a real Android Context and cannot run as

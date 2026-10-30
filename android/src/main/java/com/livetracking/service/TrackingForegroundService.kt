@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.livetracking.runtime.TrackingRuntime
 
 /**
  * Android Foreground Service for persistent location tracking.
@@ -29,9 +30,13 @@ class TrackingForegroundService : Service() {
         private const val EXTRA_NOTIFICATION_ICON = "extra_notification_icon"
         private const val EXTRA_CHANNEL_ID = "extra_channel_id"
         private const val EXTRA_CHANNEL_NAME = "extra_channel_name"
+        private const val EXTRA_START_REASON = "extra_start_reason"
 
         /**
          * Start the foreground service with notification configuration.
+         *
+         * @param reason why the service is being started (e.g. "boot") —
+         *        surfaced to TrackingRuntime for self-heal and observability
          */
         fun start(
             context: Context,
@@ -39,7 +44,8 @@ class TrackingForegroundService : Service() {
             text: String = "Tracking your location",
             icon: String? = null,
             channelId: String = DEFAULT_CHANNEL_ID,
-            channelName: String = DEFAULT_CHANNEL_NAME
+            channelName: String = DEFAULT_CHANNEL_NAME,
+            reason: String? = null
         ) {
             val intent = Intent(context, TrackingForegroundService::class.java).apply {
                 putExtra(EXTRA_NOTIFICATION_TITLE, title)
@@ -48,6 +54,9 @@ class TrackingForegroundService : Service() {
                 putExtra(EXTRA_CHANNEL_NAME, channelName)
                 if (icon != null) {
                     putExtra(EXTRA_NOTIFICATION_ICON, icon)
+                }
+                if (reason != null) {
+                    putExtra(EXTRA_START_REASON, reason)
                 }
             }
 
@@ -84,12 +93,23 @@ class TrackingForegroundService : Service() {
         val notification = buildNotification(title, text, iconName, channelId)
         startForeground(NOTIFICATION_ID, notification)
 
+        // Self-heal hook: rebuild engines from persisted config and re-arm the
+        // native status watcher after process death, sticky restart, or reboot.
+        val reason = intent?.getStringExtra(EXTRA_START_REASON)
+            ?: if (intent == null) "sticky_restart" else "explicit"
+        val result = TrackingRuntime.getInstance(applicationContext).onServiceStarted(reason)
+        if (result == TrackingRuntime.ServiceStartResult.RESUME_FAILED) {
+            // Nothing valid to resume — don't leave a zombie notification running
+            stopSelf()
+        }
+
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        TrackingRuntime.getInstance(applicationContext).onServiceDestroyed()
     }
 
     /**
