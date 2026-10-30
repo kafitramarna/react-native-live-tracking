@@ -1,8 +1,6 @@
 package com.livetracking
 
 import com.livetracking.queue.QueuedLocation
-import com.livetracking.queue.QueuedLocationDao
-import io.mockk.*
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -15,24 +13,22 @@ import java.util.concurrent.Callable
 /**
  * Unit tests for QueueEngine and QueuedLocation.
  *
- * NOTE: QueueEngine depends on Room Database (TrackingDatabase) which requires Android Context.
+ * NOTE: QueueEngine depends on TrackingDatabase (SQLiteOpenHelper) which requires Android
+ * Context and cannot be mocked in plain JVM tests.
  * These tests verify:
  * - QueuedLocation data class structure and field correctness
  * - UUID generation for unique IDs
  * - Executor-based background threading pattern
- * - DAO interface contract
  *
- * Full Room database integration tests (insert, query, delete) require instrumented tests
- * (androidTest) running on a device or emulator with a real or in-memory Room database.
+ * Full database integration tests (insert, query, delete, per-target cap) require
+ * instrumented tests (androidTest) running on a device or emulator.
  */
 class QueueEngineTest {
 
-    private lateinit var mockDao: QueuedLocationDao
     private lateinit var executor: ExecutorService
 
     @Before
     fun setup() {
-        mockDao = mockk(relaxed = true)
         executor = Executors.newSingleThreadExecutor()
     }
 
@@ -240,60 +236,6 @@ class QueueEngineTest {
 
         assertEquals(listOf(1, 2, 3, 4, 5), executionOrder)
         singleThreadExecutor.shutdown()
-    }
-
-    // --- DAO Interface Contract Tests ---
-
-    @Test
-    fun `QueuedLocationDao insert is called with correct location`() {
-        val location = QueuedLocation(
-            id = "test-id",
-            latitude = 37.0,
-            longitude = -122.0,
-            timestamp = 1000L,
-            accuracy = 5.0f,
-            speed = null,
-            altitude = null,
-            bearing = null,
-            createdAt = 2000L
-        )
-
-        mockDao.insert(location)
-
-        verify(exactly = 1) { mockDao.insert(location) }
-    }
-
-    @Test
-    fun `QueuedLocationDao getOldestBatch respects limit parameter`() {
-        val batch = listOf(
-            QueuedLocation("1", 0.0, 0.0, 100L, 5.0f, null, null, null, 100L),
-            QueuedLocation("2", 0.0, 0.0, 200L, 5.0f, null, null, null, 200L)
-        )
-
-        every { mockDao.getOldestBatch(10) } returns batch
-
-        val result = mockDao.getOldestBatch(10)
-
-        assertEquals(2, result.size)
-        verify { mockDao.getOldestBatch(10) }
-    }
-
-    @Test
-    fun `QueuedLocationDao deleteByIds accepts list of IDs`() {
-        val ids = listOf("id-1", "id-2", "id-3")
-
-        mockDao.deleteByIds(ids)
-
-        verify(exactly = 1) { mockDao.deleteByIds(ids) }
-    }
-
-    @Test
-    fun `QueuedLocationDao getCount returns integer`() {
-        every { mockDao.getCount() } returns 42
-
-        val count = mockDao.getCount()
-
-        assertEquals(42, count)
     }
 
     // --- Enqueue Pattern Tests ---
