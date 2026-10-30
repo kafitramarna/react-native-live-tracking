@@ -9,6 +9,8 @@ Real-time location tracking library for React Native with Firebase synchronizati
 - **Offline-First** — Per-target offline queue with automatic sync when connection restores
 - **Battery Optimization** — Distance/Time matrix filter + Motion Sleep Mode
 - **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED)
+- **Self-Healing Service (Android)** — Engines rebuilt and resumed natively after process death or reboot — no zombie notification
+- **Remote Status Control (Android)** — Optional native RTDB listener starts/stops tracking even while the JS layer is dead
 - **Cross-Platform** — iOS 13+ & Android API 21+
 - **New Architecture Ready** — Works with both TurboModules (New Arch) and legacy Bridge (Old Arch) via interop
 
@@ -254,6 +256,16 @@ firebase: {
 | `iosNotification.title` | string | — | Notification title (required when enabled) |
 | `iosNotification.text` | string | — | Notification body (required when enabled) |
 
+### Control (Android only)
+
+Optional native lifecycle control. When absent, behavior is identical to previous versions — no breaking change.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `control.statusPath` | string | — | RTDB path watched natively (e.g. `delivery/123/status`). When omitted, derived from the first RTDB target's parent path + `/status` |
+| `control.stopValue` | number | 2 | Value that stops tracking when observed at `statusPath` |
+| `control.resumeOnRestart` | boolean | true | Resume engines after service restart/reboot. When `false`, an interrupted session is marked stopped instead of resumed |
+
 ## How It Works
 
 ### Distance/Time Matrix
@@ -294,6 +306,15 @@ When `stopWhenStill: true` and device is stationary for > 3 minutes:
 - `push`: max 5 retries
 - Base delay 1000ms, multiplier 2x, jitter ±200ms
 - Non-transient errors (permission denied) fail immediately without retry
+
+### Native Resilience (Android)
+
+Tracking is owned by a process-wide `TrackingRuntime` singleton on the application context, decoupled from the React context:
+
+- **Self-heal after kill/reboot** — when the foreground service restarts (`START_STICKY` null intent or `BOOT_COMPLETED`), engines are rebuilt from the persisted config and tracking resumes without the JS layer. If resume is impossible (permission revoked, missing config), the service stops itself — no "zombie notification" showing a notification while tracking is dead.
+- **Remote status stop** — when `control.statusPath` is set, a native `ValueEventListener` watches that RTDB path while tracking is active. When the value equals `control.stopValue`, tracking stops natively — this works even when the React context is dead. The first snapshot after arming also fires, so a stop value already written while the app was dead is still honored.
+- **Observability markers** — `getStatus()` reports `nativeWatching` (watcher armed), and one-shot `lastRestartReason` (`sticky_restart`, `boot`, `service_destroyed_while_tracking`) and `lastStopReason` (`manual`, `remote_status`, `permission_revoked`, `resume_failed`, `resume_disabled`). Each marker is cleared after the first `getStatus()` that reads it — read once at app launch for interruption reporting.
+- On iOS these fields are returned as inert values (`false`/`null`); tracking there already runs in the app process, which stays alive while background location is active.
 
 ## Platform Setup
 
@@ -373,6 +394,8 @@ Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 | `getQueuedLocationsByTarget()` | `Promise<Record<string, number>>` | Get queue count per target path |
 | `onLocationUpdate(cb)` | `Subscription` | Listen for location updates |
 | `onError(cb)` | `Subscription` | Listen for errors |
+
+`getStatus()` resolves to `TrackingStatus` with fields: `state`, `isOnline`, `queuedLocations`, `lastLocation`, `batteryOptimization`, `nativeWatching`, `lastRestartReason`, `lastStopReason` (the last two are one-shot markers — see [Native Resilience](#native-resilience-android)).
 
 ## Error Codes
 
