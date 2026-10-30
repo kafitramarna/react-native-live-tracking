@@ -98,6 +98,33 @@ export interface FirebaseConfig {
 }
 
 /**
+ * Native lifecycle control configuration (Android only).
+ *
+ * When provided, the native layer arms a status watcher on the given RTDB
+ * path while tracking is active — remote stop signals are honored even when
+ * the RN/JS layer is dead. The foreground service can also self-heal: rebuild
+ * engines from the persisted config after process death/reboot and resume
+ * tracking without the JS layer.
+ */
+export interface ControlConfig {
+  /**
+   * RTDB path to watch for a stop signal (e.g. 'delivery/123/status').
+   * When omitted, the path is derived from the first RTDB sync target
+   * (e.g. 'delivery/123/current' -> 'delivery/123/status').
+   */
+  statusPath?: string;
+  /**
+   * Numeric value on statusPath that triggers a native stop. Default: 2
+   */
+  stopValue?: number;
+  /**
+   * Whether engines may be rebuilt and resumed natively after process
+   * death/reboot. Default: true
+   */
+  resumeOnRestart?: boolean;
+}
+
+/**
  * Main configuration object passed to `configure()`.
  */
 export interface TrackingConfig {
@@ -109,6 +136,8 @@ export interface TrackingConfig {
   iosNotification?: IOSNotificationConfig;
   /** Firebase connection and path configuration */
   firebase: FirebaseConfig;
+  /** Native lifecycle control (Android only, ignored on iOS) */
+  control?: ControlConfig;
 }
 
 // ─── Data Interfaces ─────────────────────────────────────────────────────────
@@ -163,6 +192,20 @@ export interface TrackingStatus {
   lastLocation: LocationData | null;
   /** Current battery optimization mode */
   batteryOptimization: 'full_accuracy' | 'low_power' | 'disabled';
+  /** Whether the native status watcher is currently armed (Android) */
+  nativeWatching: boolean;
+  /**
+   * Why the foreground service was last restarted outside the normal flow
+   * (e.g. 'sticky_restart', 'boot', 'service_destroyed_while_tracking').
+   * One-shot marker: cleared after the first getStatus() that reads it.
+   */
+  lastRestartReason: string | null;
+  /**
+   * Why tracking last stopped (e.g. 'manual', 'remote_status',
+   * 'permission_revoked', 'resume_failed', 'resume_disabled').
+   * One-shot marker: cleared after the first getStatus() that reads it.
+   */
+  lastStopReason: string | null;
 }
 
 // ─── Validation Interfaces ───────────────────────────────────────────────────

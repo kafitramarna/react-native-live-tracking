@@ -580,6 +580,70 @@ describe('validateConfig', () => {
     expect(result.valid).toBe(true);
     expect(result.errors.filter((e) => e.code === 'DEPRECATED_FIELD')).toHaveLength(0);
   });
+
+  it('valid control object passes validation', () => {
+    const config = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      control: {
+        statusPath: '/users/user1/status',
+        stopValue: 2,
+        resumeOnRestart: true,
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('control absent passes validation', () => {
+    const result = validateConfig(validConfig);
+    expect(result.valid).toBe(true);
+  });
+
+  it('non-object control returns error', () => {
+    const config = { ...validConfig, control: 'yes' };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'control')).toBe(true);
+  });
+
+  it('empty control.statusPath returns error', () => {
+    const config = { ...validConfig, control: { statusPath: '   ' } };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'control.statusPath')).toBe(true);
+  });
+
+  it('non-numeric control.stopValue returns error', () => {
+    const config = { ...validConfig, control: { stopValue: 'two' } };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'control.stopValue')).toBe(true);
+  });
+
+  it('non-boolean control.resumeOnRestart returns error', () => {
+    const config = { ...validConfig, control: { resumeOnRestart: 'yes' } };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'control.resumeOnRestart')).toBe(true);
+  });
+
+  it('control passes through applyDefaults unchanged', () => {
+    const config: TrackingConfig = {
+      optimization: {},
+      firebase: {
+        service: 'RTDB',
+        targets: [{ path: '/users/user1/location', method: 'set' }],
+      },
+      control: { statusPath: '/users/user1/status', stopValue: 2 },
+    };
+    const result = applyDefaults(config);
+    expect(result.control).toEqual({ statusPath: '/users/user1/status', stopValue: 2 });
+  });
 });
 
 describe('applyDefaults', () => {

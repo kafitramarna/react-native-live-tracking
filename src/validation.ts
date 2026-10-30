@@ -66,6 +66,11 @@ export function validateConfig(config: unknown): ConfigValidationResult {
     validateIOSNotification(cfg['iosNotification'], errors);
   }
 
+  // Validate control (optional)
+  if (cfg['control'] !== undefined) {
+    validateControl(cfg['control'], errors);
+  }
+
   return {
     valid: errors.length === 0,
     errors,
@@ -548,5 +553,52 @@ function validateIOSNotification(
         code: 'REQUIRED_FIELD',
       });
     }
+  }
+}
+
+function validateControl(control: unknown, errors: ConfigError[]): void {
+  if (typeof control !== 'object' || control === null) {
+    errors.push({
+      field: 'control',
+      message: 'control must be an object',
+      code: 'INVALID_TYPE',
+    });
+    return;
+  }
+
+  const ctl = control as Record<string, unknown>;
+
+  // statusPath (optional, but if provided must be a non-empty string)
+  if (ctl['statusPath'] !== undefined) {
+    if (
+      typeof ctl['statusPath'] !== 'string' ||
+      (ctl['statusPath'] as string).trim().length === 0
+    ) {
+      errors.push({
+        field: 'control.statusPath',
+        message: 'control.statusPath must be a non-empty string',
+        code: 'INVALID_TYPE',
+      });
+    }
+  }
+
+  // stopValue (optional, but if provided must be a finite number)
+  if (ctl['stopValue'] !== undefined) {
+    if (typeof ctl['stopValue'] !== 'number' || !isFinite(ctl['stopValue'] as number)) {
+      errors.push({
+        field: 'control.stopValue',
+        message: 'control.stopValue must be a finite number',
+        code: 'INVALID_TYPE',
+      });
+    }
+  }
+
+  // resumeOnRestart (optional, but if provided must be boolean)
+  if (ctl['resumeOnRestart'] !== undefined && typeof ctl['resumeOnRestart'] !== 'boolean') {
+    errors.push({
+      field: 'control.resumeOnRestart',
+      message: 'control.resumeOnRestart must be a boolean',
+      code: 'INVALID_TYPE',
+    });
   }
 }
