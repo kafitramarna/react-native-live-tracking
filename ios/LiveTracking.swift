@@ -506,6 +506,13 @@ class LiveTracking: RCTEventEmitter {
         }
         status["batteryOptimization"] = batteryOptimization
 
+        // Parity with Android TrackingStatus: iOS has no native status watcher
+        // and no service-restart markers — report the fields as inert values so
+        // the JS layer sees the full contract on both platforms.
+        status["nativeWatching"] = false
+        status["lastRestartReason"] = NSNull()
+        status["lastStopReason"] = NSNull()
+
         // Last location
         if let location = lastLocation {
             status["lastLocation"] = [
