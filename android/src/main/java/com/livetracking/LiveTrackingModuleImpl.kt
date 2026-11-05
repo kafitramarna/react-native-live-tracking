@@ -1,6 +1,12 @@
 package com.livetracking
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
 import android.location.Location
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.Promise
@@ -151,6 +157,48 @@ class LiveTrackingModuleImpl(private val reactContext: ReactApplicationContext) 
             promise.reject(e.errorCode, e.message)
         } catch (e: Exception) {
             promise.reject("STATUS_ERROR", "Failed to get queued locations by target: ${e.message}")
+        }
+    }
+
+    /**
+     * Whether the app is exempted from battery optimization (Doze whitelist).
+     * Apps not on the whitelist may have location delivery deferred while idle.
+     */
+    fun isIgnoringBatteryOptimizations(promise: Promise) {
+        try {
+            val pm = reactContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            promise.resolve(pm?.isIgnoringBatteryOptimizations(reactContext.packageName) ?: false)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    /**
+     * Open the system battery-optimization settings so the user can exempt the
+     * app manually. Falls back to the app details page when the dedicated
+     * screen is unavailable on this device.
+     */
+    fun openBatteryOptimizationSettings(promise: Promise) {
+        try {
+            reactContext.startActivity(
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            promise.resolve(null)
+        } catch (e: ActivityNotFoundException) {
+            try {
+                reactContext.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:${reactContext.packageName}")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                promise.resolve(null)
+            } catch (e2: Exception) {
+                promise.reject("SETTINGS_UNAVAILABLE", "Cannot open settings: ${e2.message}")
+            }
+        } catch (e: Exception) {
+            promise.reject("SETTINGS_UNAVAILABLE", "Cannot open settings: ${e.message}")
         }
     }
 

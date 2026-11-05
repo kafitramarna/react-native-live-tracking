@@ -57,6 +57,14 @@ class LiveTrackingModule(reactContext: ReactApplicationContext) :
         impl.getQueuedLocationsByTarget(promise)
     }
 
+    override fun isIgnoringBatteryOptimizations(promise: Promise) {
+        impl.isIgnoringBatteryOptimizations(promise)
+    }
+
+    override fun openBatteryOptimizationSettings(promise: Promise) {
+        impl.openBatteryOptimizationSettings(promise)
+    }
+
     @ReactMethod
     override fun addListener(eventName: String) {
         // Required for RN event emitter - no-op

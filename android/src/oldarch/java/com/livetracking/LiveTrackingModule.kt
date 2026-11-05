@@ -64,6 +64,16 @@ class LiveTrackingModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun isIgnoringBatteryOptimizations(promise: Promise) {
+        impl.isIgnoringBatteryOptimizations(promise)
+    }
+
+    @ReactMethod
+    fun openBatteryOptimizationSettings(promise: Promise) {
+        impl.openBatteryOptimizationSettings(promise)
+    }
+
+    @ReactMethod
     fun addListener(eventName: String) {
         // Required for RN event emitter - no-op
     }
