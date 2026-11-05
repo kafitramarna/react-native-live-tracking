@@ -16,11 +16,23 @@ import CoreLocation
  * - PermissionHandler: Permission checks
  * - BackgroundModeHelper: Significant location monitoring
  * - TrackingCleanup: Stop/cleanup utility
+ * - TrackingStateStore: Persisted config/state for native resume after process death
+ * - StatusWatcher: Native RTDB stop-signal watcher (remote stop without JS)
+ *
+ * The module instance can outlive the RN bridge: `LiveTracking.shared` keeps the
+ * latest instance so a headless resume (LiveTrackingResume.resumeIfNeeded) reuses
+ * it, or creates a fresh headless instance when RN is not running at all.
+ * Events only emit when the JS layer attached listeners — a headless instance
+ * never sets hasListeners, so sendEvent stays inert.
  *
  * Requirements: 3.1, 4.4, 9.3, 9.4, 10.1, 10.2, 10.3, 10.4
  */
 @objc(LiveTracking)
 class LiveTracking: RCTEventEmitter {
+
+    /// Latest module instance — set on init so the native resume path can reuse
+    /// the live engines (or detect that none exist and create a headless one).
+    static var shared: LiveTracking?
 
     // MARK: - Event Names
 
@@ -41,6 +53,21 @@ class LiveTracking: RCTEventEmitter {
     private var state: TrackingState = .idle
     private var hasListeners: Bool = false
     private var wasTrackingBeforeGpsDisabled: Bool = false
+
+    // MARK: - Native control & resume state
+
+    private var statusWatcher: StatusWatcher?
+    private var controlStatusPath: String?
+    private var controlStopValue: Int = 2
+    private var firebaseService: String?
+    private var firstTargetPath: String?
+
+    // MARK: - Stale-location watchdog
+
+    private var staleTimer: DispatchSourceTimer?
+    private var lastFixWallTime: Date?
+    private var lastStaleRecoveryAt: Date?
+    private var staleRecoveries: Int = 0
 
     // MARK: - Engines
 
@@ -75,6 +102,11 @@ class LiveTracking: RCTEventEmitter {
     private var lastUpdateTime: Date?
 
     // MARK: - RCTEventEmitter Overrides
+
+    override init() {
+        super.init()
+        LiveTracking.shared = self
+    }
 
     @objc
     override static func requiresMainQueueSetup() -> Bool {
@@ -140,9 +172,21 @@ class LiveTracking: RCTEventEmitter {
         }
 
         // Validate targets array exists
-        guard firebaseConfig["targets"] is [[String: Any]] else {
+        guard let targetsArray = firebaseConfig["targets"] as? [[String: Any]] else {
             reject("INVALID_CONFIG", "Missing or invalid 'targets' array in firebase configuration", nil)
             return
+        }
+
+        self.firebaseService = service
+        self.firstTargetPath = targetsArray.first?["path"] as? String
+
+        // Parse native control config (status watcher + resume policy)
+        if let controlConfig = json["control"] as? [String: Any] {
+            let path = controlConfig["statusPath"] as? String
+            self.controlStatusPath = (path?.isEmpty == false) ? path : nil
+            if let stopValue = controlConfig["stopValue"] as? Int {
+                self.controlStopValue = stopValue
+            }
         }
 
         // Parse optimization config (optional with defaults)
@@ -234,6 +278,10 @@ class LiveTracking: RCTEventEmitter {
         self.permissionHandler = PermissionHandler()
         self.trackingCleanup = TrackingCleanup()
 
+        // Persist the raw config so a session can be rebuilt natively after
+        // process death (parity with Android TrackingStateStore.saveConfig)
+        TrackingStateStore.saveConfig(config)
+
         // Update state
         self.state = .configured
 
@@ -303,9 +351,13 @@ class LiveTracking: RCTEventEmitter {
         // Reset last update tracking
         lastUpdateTime = nil
         lastLocation = nil
+        lastFixWallTime = nil
 
         // Update state
         state = .tracking
+
+        // Persist so the session can resume natively after process death
+        TrackingStateStore.saveTrackingActive(true)
 
         // Flush any pending offline queues
         syncEngineController?.flushOfflineQueues()
@@ -321,11 +373,24 @@ class LiveTracking: RCTEventEmitter {
      */
     @objc
     func stop(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        performStop(reason: "manual") {
+            resolve(nil)
+        }
+    }
+
+    /**
+     * Shared stop path used by the JS `stop()` call and the native status
+     * watcher (remote stop). Records the stop reason as a one-shot marker.
+     */
+    private func performStop(reason: String, completion: @escaping () -> Void) {
         guard state == .tracking || state == .motionSleep || state == .pausedGps else {
             // Already stopped, resolve silently
-            resolve(nil)
+            completion()
             return
         }
+
+        // Disarm the native watcher first so no further remote stops can fire
+        statusWatcher?.disarm()
 
         // Remove persistent notification
         TrackingNotificationManager.shared.removeTrackingNotification()
@@ -333,7 +398,7 @@ class LiveTracking: RCTEventEmitter {
         // Flush all partial batches before stopping (Requirement 4.4)
         syncEngineController?.flushAll { [weak self] in
             guard let self = self else {
-                resolve(nil)
+                completion()
                 return
             }
 
@@ -350,14 +415,19 @@ class LiveTracking: RCTEventEmitter {
                 object: nil
             )
 
+            // Persist as inactive + record why tracking stopped
+            TrackingStateStore.saveTrackingActive(false)
+            TrackingStateStore.saveLastStopReason(reason)
+
             // Reset state
             self.lastLocation = nil
             self.lastUpdateTime = nil
+            self.lastFixWallTime = nil
             self.wasTrackingBeforeGpsDisabled = false
             self.state = .configured
             self.hasListeners = false
 
-            resolve(nil)
+            completion()
         }
     }
 
@@ -379,27 +449,40 @@ class LiveTracking: RCTEventEmitter {
         // Start network listener for queue flush
         networkListener?.startListening()
 
-        // Start significant location monitoring as fallback
-        let clManager = CLLocationManager()
+        // Start significant location monitoring as fallback — on the SAME
+        // CLLocationManager that drives standard updates. Monitoring is tracked
+        // per manager object; a separate instance here used to deallocate
+        // immediately (weak ref in TrackingCleanup) and could never be stopped.
         if CLLocationManager.significantLocationChangeMonitoringAvailable() {
-            BackgroundModeHelper.shared.startSignificantLocationMonitoring(locationManager: clManager)
+            BackgroundModeHelper.shared.startSignificantLocationMonitoring(
+                locationManager: locationEngine.locationManager
+            )
         }
 
         // Mark tracking active
-        trackingCleanup?.markTrackingActive(locationManager: clManager)
+        trackingCleanup?.markTrackingActive(locationManager: locationEngine.locationManager)
+
+        // Arm native status watcher so remote stops work without JS
+        armStatusWatcher()
+
+        // Arm stale-location watchdog so OS-throttled delivery self-recovers
+        armStaleWatchdog()
     }
 
     /**
      * Stop location engine, activity recognition, network listener, and significant location monitoring.
      */
     private func stopTrackingEngines() {
-        // Stop location engine and significant location monitoring
+        disarmStaleWatchdog()
+        statusWatcher?.disarm()
+
+        // Stop location engine and significant location monitoring — same
+        // manager instance that started monitoring, otherwise it never stops.
         if let locationEngine = self.locationEngine {
-            let clManager = CLLocationManager()
             self.trackingCleanup?.stopAllTracking(
                 locationEngine: locationEngine,
                 backgroundHelper: BackgroundModeHelper.shared,
-                locationManager: clManager
+                locationManager: locationEngine.locationManager
             )
         }
 
@@ -408,6 +491,132 @@ class LiveTracking: RCTEventEmitter {
 
         // Stop network listener
         self.networkListener?.stopListening()
+    }
+
+    /**
+     * Resolve the RTDB path the native status watcher should observe:
+     * explicit control.statusPath wins; otherwise derive from the first RTDB
+     * target by stripping the last segment and appending "/status".
+     */
+    private func resolvedStatusPath() -> String? {
+        if let explicit = controlStatusPath {
+            return explicit
+        }
+        guard firebaseService == "RTDB", let firstPath = firstTargetPath else {
+            return nil
+        }
+        guard let slash = firstPath.lastIndex(of: "/") else {
+            return nil
+        }
+        return String(firstPath[..<slash]) + "/status"
+    }
+
+    private func armStatusWatcher() {
+        guard let path = resolvedStatusPath() else { return }
+        let watcher = statusWatcher ?? StatusWatcher(stopValue: controlStopValue) { [weak self] in
+            // Firebase listener fires on a callback queue — performStop is
+            // self-contained and safe to call from any thread
+            self?.performStop(reason: "remote_status") {}
+        }
+        watcher.arm(path: path)
+        statusWatcher = watcher
+    }
+
+    // MARK: - Stale-location watchdog
+
+    /**
+     * Arm the stale watchdog: ticks every intervalMs; a tick only acts when no
+     * accepted fix arrived within the stale threshold.
+     */
+    private func armStaleWatchdog() {
+        disarmStaleWatchdog()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(intervalMs),
+            repeating: .milliseconds(intervalMs)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.checkStaleLocation()
+        }
+        staleTimer = timer
+        timer.resume()
+    }
+
+    private func disarmStaleWatchdog() {
+        staleTimer?.cancel()
+        staleTimer = nil
+    }
+
+    /**
+     * If no fix arrived within the stale threshold while tracking is active,
+     * re-request location updates. iOS may silently pause delivery without
+     * telling the app — re-requesting is cheap and does not touch app state.
+     */
+    private func checkStaleLocation() {
+        guard state == .tracking, let last = lastFixWallTime else { return }
+
+        let threshold = max(Double(intervalMs) * 3 / 1000.0, 30.0)
+        let elapsed = Date().timeIntervalSince(last)
+        guard elapsed > threshold else { return }
+
+        // Re-arm at most once per threshold window
+        if let lastRecovery = lastStaleRecoveryAt,
+           Date().timeIntervalSince(lastRecovery) < threshold {
+            return
+        }
+        lastStaleRecoveryAt = Date()
+        staleRecoveries += 1
+
+        emitErrorEvent(
+            errorCode: "LOCATION_STALE_RECOVERY",
+            message: "No location fix for \(Int(elapsed * 1000))ms while tracking — re-requesting location updates"
+        )
+
+        let clDistanceFilter: Double = (optimizationMode == "interval") ? kCLDistanceFilterNone : distanceFilterMeters
+        locationEngine?.stopLocationUpdates()
+        locationEngine?.startLocationUpdates(intervalMs: intervalMs, distanceFilter: clDistanceFilter)
+    }
+
+    // MARK: - Native resume
+
+    /**
+     * Rebuild engines from a persisted config and resume tracking without the
+     * JS layer. Called by LiveTrackingResume on relaunch. Returns true when the
+     * session was successfully resumed.
+     */
+    func resumeFromSavedConfig(_ config: String) -> Bool {
+        var configured = false
+        configure(config, resolve: { _ in configured = true }, reject: { _, _, _ in })
+        guard configured else {
+            TrackingStateStore.saveTrackingActive(false)
+            TrackingStateStore.saveLastStopReason("resume_failed")
+            return false
+        }
+
+        // Resume requires the same permissions as start()
+        guard let permissionHandler = self.permissionHandler else {
+            TrackingStateStore.saveTrackingActive(false)
+            TrackingStateStore.saveLastStopReason("resume_failed")
+            return false
+        }
+        guard case .granted = permissionHandler.checkAllRequirements() else {
+            TrackingStateStore.saveTrackingActive(false)
+            TrackingStateStore.saveLastStopReason("permission_revoked")
+            return false
+        }
+
+        // Mirror the JS start() path: persistent notification + pending queue flush
+        if iosNotificationEnabled,
+           let title = iosNotificationTitle,
+           let text = iosNotificationText {
+            TrackingNotificationManager.shared.configure(title: title, body: text)
+            TrackingNotificationManager.shared.showTrackingNotification()
+        }
+
+        startTrackingEngines()
+        state = .tracking
+        syncEngineController?.flushOfflineQueues()
+        return true
     }
 
     /**
@@ -506,12 +715,15 @@ class LiveTracking: RCTEventEmitter {
         }
         status["batteryOptimization"] = batteryOptimization
 
-        // Parity with Android TrackingStatus: iOS has no native status watcher
-        // and no service-restart markers — report the fields as inert values so
-        // the JS layer sees the full contract on both platforms.
-        status["nativeWatching"] = false
-        status["lastRestartReason"] = NSNull()
-        status["lastStopReason"] = NSNull()
+        // Stale-location watchdog diagnostics (parity with Android)
+        status["lastFixAt"] = lastFixWallTime.map { Int64($0.timeIntervalSince1970 * 1000) } ?? NSNull()
+        status["staleRecoveries"] = staleRecoveries
+
+        // Parity with Android TrackingStatus — now backed by the real native
+        // StatusWatcher and TrackingStateStore markers (consumed on read).
+        status["nativeWatching"] = statusWatcher?.isArmed == true
+        status["lastRestartReason"] = TrackingStateStore.consumeLastRestartReason() ?? NSNull()
+        status["lastStopReason"] = TrackingStateStore.consumeLastStopReason() ?? NSNull()
 
         // Last location
         if let location = lastLocation {
@@ -581,6 +793,22 @@ class LiveTracking: RCTEventEmitter {
         }
     }
 
+    /**
+     * Battery optimization exemption does not exist on iOS — always true.
+     */
+    @objc
+    func isIgnoringBatteryOptimizations(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        resolve(true)
+    }
+
+    /**
+     * No battery-optimization screen exists on iOS — no-op parity method.
+     */
+    @objc
+    func openBatteryOptimizationSettings(_ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock) {
+        resolve(nil)
+    }
+
     // MARK: - Private Methods
 
     /**
@@ -645,6 +873,7 @@ class LiveTracking: RCTEventEmitter {
         // Update last known location and time
         lastLocation = location
         lastUpdateTime = location.timestamp
+        lastFixWallTime = Date()
 
         let locationData: [String: Any] = [
             "latitude": location.coordinate.latitude,

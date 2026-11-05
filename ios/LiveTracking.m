@@ -29,6 +29,12 @@ RCT_EXTERN_METHOD(getQueuedLocations:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(getQueuedLocationsByTarget:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(isIgnoringBatteryOptimizations:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(openBatteryOptimizationSettings:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
 + (BOOL)requiresMainQueueSetup
 {
     return NO;

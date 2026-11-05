@@ -28,8 +28,10 @@ class TrackingCleanup {
     /// Tracks whether tracking is currently active
     private var isTrackingActive: Bool = false
 
-    /// Reference to the location manager used for significant location monitoring cleanup
-    private weak var locationManager: CLLocationManager?
+    /// Reference to the location manager used for significant location monitoring cleanup.
+    /// Held strongly — a weak reference lets the manager deallocate while system-level
+    /// monitoring is still armed, which silently breaks the SLC relaunch path.
+    private var locationManager: CLLocationManager?
 
     // MARK: - Public Methods
 

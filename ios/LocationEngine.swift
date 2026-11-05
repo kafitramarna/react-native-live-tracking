@@ -26,7 +26,11 @@ extension LocationUpdateDelegate {
  */
 class LocationEngine: NSObject, CLLocationManagerDelegate {
 
-    private var locationManager: CLLocationManager!
+    /// Exposed read-only so significant-location-change monitoring can run on
+    /// the SAME manager instance that drives standard updates — monitoring is
+    /// tracked per CLLocationManager object, so using a second instance would
+    /// leak a dangling monitor that can never be stopped.
+    private(set) var locationManager: CLLocationManager!
 
     weak var delegate: LocationUpdateDelegate?
 
