@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-05
+
+### Added
+
+- **Partial wake lock (Android)** — `android.wakeLock` config (default `true`). When enabled,
+  `TrackingForegroundService` holds a `PARTIAL_WAKE_LOCK` for the whole tracking session so the
+  fused location provider keeps delivering fixes while the device is idle/dozing.
+- **Native stale-location watchdog (Android + iOS)** — while tracking is active, a watchdog ticks
+  every `intervalMs`. If no accepted fix arrived within the stale threshold, native location
+  updates are re-requested without JS involvement and a `LOCATION_STALE_RECOVERY` event is
+  emitted. `getStatus()` now reports `lastFixAt` (wall-clock ms of the last accepted fix) and
+  `staleRecoveries` (how many times the watchdog had to re-request updates).
+- **Battery optimization helpers** — `isIgnoringBatteryOptimizations()` and
+  `openBatteryOptimizationSettings()`. On Android they report Doze-whitelist state and open the
+  system battery-optimization screen; on iOS they resolve `true` / no-op for API parity.
+  Exemption is optional — tracking works without it, with reduced resilience in deep doze.
+- **iOS native resume after process death** — `TrackingStateStore` persists the active session
+  and config in `UserDefaults`; a native `StatusWatcher` mirrors the Android RTDB stop listener;
+  `LiveTrackingResume.resumeIfNeeded(launchOptions:)` rebuilds engines and resumes tracking from
+  `application(_:didFinishLaunchingWithOptions:)` — works on both manual relaunch and
+  significant-location relaunch (`launchOptions[.location]`) without waiting for the JS layer.
+- **iOS observability parity** — `getStatus()` now exposes the same markers as Android:
+  `nativeWatching`, one-shot `lastRestartReason` (`location_relaunch`, `cold_start`) and
+  `lastStopReason`, plus `lastFixAt` and `staleRecoveries`.
+- **New `android` config field** — `android.wakeLock` (default `true`). The stale threshold is
+  derived from `optimization.intervalMs` (`max(intervalMs * 3, 30s)`) — no extra config needed.
+
+### Fixed
+
+- **iOS significant-location monitoring was never armed** — the monitoring `CLLocationManager`
+  was only held `weak` and deallocated immediately; process-death relaunch via SLC could never
+  fire. The manager is now strongly held for the session lifetime and stopped correctly.
+- **`updatedAt` freshness now uses wall-clock write time** — `current.updatedAt` in Firebase was
+  previously copied from the provider fix timestamp; it now reflects when the value was actually
+  written, so dashboard freshness checks are not skewed by GPS clock drift on some devices.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added
