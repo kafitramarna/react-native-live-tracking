@@ -98,11 +98,23 @@ export interface FirebaseConfig {
 }
 
 /**
- * Native lifecycle control configuration (Android only).
+ * Android platform behavior configuration.
+ */
+export interface AndroidConfig {
+  /**
+   * Whether the tracking foreground service holds a partial wake lock so the
+   * OS cannot suspend the process while tracking is active. Default: true.
+   * Note: deep Doze ignores wake locks for non-exempted apps.
+   */
+  wakeLock?: boolean;
+}
+
+/**
+ * Native lifecycle control configuration.
  *
  * When provided, the native layer arms a status watcher on the given RTDB
  * path while tracking is active — remote stop signals are honored even when
- * the RN/JS layer is dead. The foreground service can also self-heal: rebuild
+ * the RN/JS layer is dead. The native layer can also self-heal: rebuild
  * engines from the persisted config after process death/reboot and resume
  * tracking without the JS layer.
  */
@@ -130,13 +142,15 @@ export interface ControlConfig {
 export interface TrackingConfig {
   /** Optimization settings for battery and update frequency */
   optimization: OptimizationConfig;
+  /** Android platform behavior settings (Android only) */
+  android?: AndroidConfig;
   /** Android foreground service notification settings (Android only) */
   androidNotification?: AndroidNotificationConfig;
   /** iOS persistent notification settings (iOS only) */
   iosNotification?: IOSNotificationConfig;
   /** Firebase connection and path configuration */
   firebase: FirebaseConfig;
-  /** Native lifecycle control (Android only, ignored on iOS) */
+  /** Native lifecycle control (status watcher + native resume) */
   control?: ControlConfig;
 }
 
@@ -194,6 +208,26 @@ export interface TrackingStatus {
   batteryOptimization: 'full_accuracy' | 'low_power' | 'disabled';
   /** Whether the native status watcher is currently armed (Android) */
   nativeWatching: boolean;
+  /**
+   * Whether the app is exempted from battery optimization (Android only).
+   * Omitted on iOS where the concept does not exist.
+   */
+  batteryOptimizationExempt?: boolean;
+  /**
+   * Whether the foreground service is configured to hold a wake lock
+   * (Android only).
+   */
+  wakeLock?: boolean;
+  /**
+   * Wall-clock time (ms) of the last accepted location fix, or null before
+   * the first fix. Use this — not lastLocation.timestamp — to judge liveness.
+   */
+  lastFixAt?: number | null;
+  /**
+   * How many times the native stale-location watchdog had to re-request
+   * location updates this session (Android and iOS).
+   */
+  staleRecoveries?: number;
   /**
    * Why the foreground service was last restarted outside the normal flow
    * (e.g. 'sticky_restart', 'boot', 'service_destroyed_while_tracking').
@@ -292,4 +326,16 @@ export interface LiveTrackingModule {
    * Returns a record mapping each configured target path to its queued location count.
    */
   getQueuedLocationsByTarget(): Promise<Record<string, number>>;
+
+  /**
+   * Whether the app is exempted from battery optimization (Doze whitelist).
+   * Always resolves true on iOS.
+   */
+  isIgnoringBatteryOptimizations(): Promise<boolean>;
+
+  /**
+   * Open the system screen where the user can exempt the app from battery
+   * optimization. No-op on iOS.
+   */
+  openBatteryOptimizationSettings(): Promise<void>;
 }

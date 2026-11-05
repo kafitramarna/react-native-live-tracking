@@ -20,6 +20,8 @@ export interface Spec extends TurboModule {
   getStatus(): Promise<string>;
   getQueuedLocations(): Promise<number>;
   getQueuedLocationsByTarget(): Promise<string>;
+  isIgnoringBatteryOptimizations(): Promise<boolean>;
+  openBatteryOptimizationSettings(): Promise<void>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }

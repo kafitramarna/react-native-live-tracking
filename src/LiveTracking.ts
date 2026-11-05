@@ -154,6 +154,22 @@ const LiveTracking: LiveTrackingModule = {
     const jsonString = await native().getQueuedLocationsByTarget();
     return JSON.parse(jsonString);
   },
+
+  /**
+   * Whether the app is exempted from battery optimization.
+   * On iOS this concept does not exist — always resolves true.
+   */
+  async isIgnoringBatteryOptimizations(): Promise<boolean> {
+    return native().isIgnoringBatteryOptimizations();
+  },
+
+  /**
+   * Open the system screen where the user can exempt the app from battery
+   * optimization. On iOS this is a no-op.
+   */
+  async openBatteryOptimizationSettings(): Promise<void> {
+    await native().openBatteryOptimizationSettings();
+  },
 };
 
 export default LiveTracking;
