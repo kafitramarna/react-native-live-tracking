@@ -85,7 +85,7 @@ class FirebaseSyncEngine {
             "longitude": longitude,
             "timestamp": timestamp,
             "accuracy": accuracy,
-            "updatedAt": timestamp
+            "updatedAt": Int64(Date().timeIntervalSince1970 * 1000)
         ]
         if let speed = speed {
             data["speed"] = speed

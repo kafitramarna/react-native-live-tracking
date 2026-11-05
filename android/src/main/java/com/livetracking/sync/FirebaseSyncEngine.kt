@@ -75,7 +75,7 @@ class FirebaseSyncEngine(
             "longitude" to longitude,
             "timestamp" to timestamp,
             "accuracy" to accuracy.toDouble(),
-            "updatedAt" to timestamp
+            "updatedAt" to System.currentTimeMillis()
         )
         speed?.let { data["speed"] = it.toDouble() }
 
