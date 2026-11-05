@@ -8,8 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.livetracking.receiver.TrackingStateStore
 import com.livetracking.runtime.TrackingRuntime
+import org.json.JSONObject
 
 /**
  * Android Foreground Service for persistent location tracking.
@@ -31,6 +34,8 @@ class TrackingForegroundService : Service() {
         private const val EXTRA_CHANNEL_ID = "extra_channel_id"
         private const val EXTRA_CHANNEL_NAME = "extra_channel_name"
         private const val EXTRA_START_REASON = "extra_start_reason"
+        private const val EXTRA_WAKE_LOCK = "extra_wake_lock"
+        private const val WAKE_LOCK_TAG = "LiveTracking::TrackingWakeLock"
 
         /**
          * Start the foreground service with notification configuration.
@@ -45,13 +50,15 @@ class TrackingForegroundService : Service() {
             icon: String? = null,
             channelId: String = DEFAULT_CHANNEL_ID,
             channelName: String = DEFAULT_CHANNEL_NAME,
-            reason: String? = null
+            reason: String? = null,
+            wakeLock: Boolean = true
         ) {
             val intent = Intent(context, TrackingForegroundService::class.java).apply {
                 putExtra(EXTRA_NOTIFICATION_TITLE, title)
                 putExtra(EXTRA_NOTIFICATION_TEXT, text)
                 putExtra(EXTRA_CHANNEL_ID, channelId)
                 putExtra(EXTRA_CHANNEL_NAME, channelName)
+                putExtra(EXTRA_WAKE_LOCK, wakeLock)
                 if (icon != null) {
                     putExtra(EXTRA_NOTIFICATION_ICON, icon)
                 }
@@ -76,6 +83,8 @@ class TrackingForegroundService : Service() {
         }
     }
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? {
         // Not a bound service
         return null
@@ -93,6 +102,10 @@ class TrackingForegroundService : Service() {
         val notification = buildNotification(title, text, iconName, channelId)
         startForeground(NOTIFICATION_ID, notification)
 
+        if (shouldHoldWakeLock(intent)) {
+            acquireWakeLock()
+        }
+
         // Self-heal hook: rebuild engines from persisted config and re-arm the
         // native status watcher after process death, sticky restart, or reboot.
         val reason = intent?.getStringExtra(EXTRA_START_REASON)
@@ -107,9 +120,46 @@ class TrackingForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        releaseWakeLock()
         super.onDestroy()
         stopForeground(STOP_FOREGROUND_REMOVE)
         TrackingRuntime.getInstance(applicationContext).onServiceDestroyed()
+    }
+
+    /**
+     * Whether the service should hold a partial wake lock while tracking.
+     * Reads the explicit intent flag first; on sticky restart (null intent)
+     * falls back to the persisted config so a self-healed session keeps the
+     * same policy the JS layer configured.
+     */
+    private fun shouldHoldWakeLock(intent: Intent?): Boolean {
+        if (intent != null && intent.hasExtra(EXTRA_WAKE_LOCK)) {
+            return intent.getBooleanExtra(EXTRA_WAKE_LOCK, true)
+        }
+        return try {
+            val config = TrackingStateStore.loadConfig(applicationContext)
+            config
+                ?.let { JSONObject(it).optJSONObject("android")?.optBoolean("wakeLock", true) }
+                ?: true
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
     }
 
     /**

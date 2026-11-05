@@ -7,6 +7,9 @@ import android.content.IntentFilter
 import android.location.Location
 import android.location.LocationManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import com.livetracking.location.LocationEngine
 import com.livetracking.network.NetworkListener
 import com.livetracking.network.NetworkStateListener
@@ -74,6 +77,13 @@ class TrackingRuntime private constructor(private val appContext: Context) {
         const val ERROR_GPS_DISABLED = "GPS_DISABLED"
         const val ERROR_GPS_ENABLED = "GPS_ENABLED"
         const val ERROR_PERMISSION_REVOKED = "PERMISSION_REVOKED"
+        const val ERROR_LOCATION_STALE_RECOVERY = "LOCATION_STALE_RECOVERY"
+
+        // Stale-location watchdog: re-request location updates when the OS
+        // stops delivering fixes (doze / vendor power management) while the
+        // tracking state still believes it is running.
+        private const val STALE_THRESHOLD_MULTIPLIER = 3L
+        private const val STALE_MIN_THRESHOLD_MS = 30000L
 
         // Stop reasons
         const val STOP_REASON_MANUAL = "manual"
@@ -129,6 +139,7 @@ class TrackingRuntime private constructor(private val appContext: Context) {
     private var notificationChannelId: String = TrackingForegroundService.DEFAULT_CHANNEL_ID
     private var notificationChannelName: String = TrackingForegroundService.DEFAULT_CHANNEL_NAME
     private var iosNotificationEnabled: Boolean = true
+    private var wakeLockEnabled: Boolean = true
 
     // Control (native status watcher + self-heal) configuration
     private var controlStatusPath: String? = null
@@ -141,6 +152,12 @@ class TrackingRuntime private constructor(private val appContext: Context) {
     private var lastUpdateTimestamp: Long = 0L
     private var wasTrackingBeforeGpsDisabled: Boolean = false
     private var gpsStatusReceiver: BroadcastReceiver? = null
+
+    // Stale-location watchdog
+    private var staleHandler: Handler? = null
+    private var staleRunnable: Runnable? = null
+    private var lastStaleRecoveryAt: Long = 0L
+    private var staleRecoveries: Int = 0
 
     /**
      * Parse JSON config and create all engines with config values.
@@ -200,6 +217,12 @@ class TrackingRuntime private constructor(private val appContext: Context) {
                 notificationIcon = androidNotification.optString("icon", "").ifEmpty { null }
                 notificationChannelId = androidNotification.optString("channelId", TrackingForegroundService.DEFAULT_CHANNEL_ID)
                 notificationChannelName = androidNotification.optString("channelName", TrackingForegroundService.DEFAULT_CHANNEL_NAME)
+            }
+
+            // Parse Android platform config
+            val androidConfig = json.optJSONObject("android")
+            if (androidConfig != null) {
+                wakeLockEnabled = androidConfig.optBoolean("wakeLock", true)
             }
 
             // Parse iOS notification config
@@ -269,7 +292,8 @@ class TrackingRuntime private constructor(private val appContext: Context) {
                 text = foregroundText,
                 icon = if (notificationEnabled) notificationIcon else null,
                 channelId = notificationChannelId,
-                channelName = notificationChannelName
+                channelName = notificationChannelName,
+                wakeLock = wakeLockEnabled
             )
 
             // Start tracking engines
@@ -462,6 +486,15 @@ class TrackingRuntime private constructor(private val appContext: Context) {
                 else -> "full_accuracy"
             }
             status.put("batteryOptimization", batteryOptimization)
+
+            // Whether the app is exempted from battery optimization
+            val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            status.put("batteryOptimizationExempt", powerManager?.isIgnoringBatteryOptimizations(appContext.packageName) ?: false)
+            status.put("wakeLock", wakeLockEnabled)
+
+            // Stale-location watchdog diagnostics
+            status.put("lastFixAt", if (lastUpdateTimestamp > 0) lastUpdateTimestamp else JSONObject.NULL)
+            status.put("staleRecoveries", staleRecoveries)
 
             // Native status watcher state
             status.put("nativeWatching", statusWatcher?.isArmed == true)
@@ -769,12 +802,17 @@ class TrackingRuntime private constructor(private val appContext: Context) {
 
         // Start network listener
         networkListener?.startListening()
+
+        // Arm stale-location watchdog so OS-throttled delivery self-recovers
+        armStaleWatchdog()
     }
 
     /**
      * Stop location engine, activity recognition, and network listener.
      */
     private fun stopLocationTracking() {
+        disarmStaleWatchdog()
+
         // Stop location engine
         locationEngine?.stopLocationUpdates()
 
@@ -783,6 +821,70 @@ class TrackingRuntime private constructor(private val appContext: Context) {
 
         // Stop network listener
         networkListener?.stopListening()
+    }
+
+    /**
+     * Arm the stale-location watchdog. Ticks every intervalMs on the main
+     * looper; a tick only acts when no fix arrived within the stale threshold.
+     */
+    private fun armStaleWatchdog() {
+        disarmStaleWatchdog()
+        val handler = Handler(Looper.getMainLooper())
+        staleHandler = handler
+        val runnable = object : Runnable {
+            override fun run() {
+                checkStaleLocation()
+                staleHandler?.postDelayed(this, intervalMs)
+            }
+        }
+        staleRunnable = runnable
+        handler.postDelayed(runnable, intervalMs)
+    }
+
+    private fun disarmStaleWatchdog() {
+        staleRunnable?.let { staleHandler?.removeCallbacks(it) }
+        staleRunnable = null
+        staleHandler = null
+    }
+
+    /**
+     * If no fix arrived within the stale threshold while tracking is active,
+     * re-request location updates. The OS may silently stop delivering fixes
+     * (doze, vendor power management) without telling the app — re-requesting
+     * is safe and cheap, and does NOT restart the foreground service so it is
+     * allowed while the app is in the background.
+     */
+    @Synchronized
+    private fun checkStaleLocation() {
+        if (trackingState != STATE_TRACKING) return
+        val last = lastUpdateTimestamp
+        if (last == 0L) return
+
+        val threshold = maxOf(intervalMs * STALE_THRESHOLD_MULTIPLIER, STALE_MIN_THRESHOLD_MS)
+        val elapsed = System.currentTimeMillis() - last
+        if (elapsed <= threshold) return
+
+        // Re-arm at most once per threshold window so a dead provider doesn't
+        // cause a stop/start loop every interval tick.
+        if (System.currentTimeMillis() - lastStaleRecoveryAt < threshold) return
+        lastStaleRecoveryAt = System.currentTimeMillis()
+        staleRecoveries++
+
+        emitError(
+            ERROR_LOCATION_STALE_RECOVERY,
+            "No location fix for ${elapsed}ms while tracking — re-requesting location updates"
+        )
+        restartLocationUpdates()
+    }
+
+    private fun restartLocationUpdates() {
+        try {
+            val effectiveDistanceFilter = if (optimizationMode == "interval") 0f else distanceFilterMeters
+            locationEngine?.stopLocationUpdates()
+            locationEngine?.startLocationUpdates(intervalMs, effectiveDistanceFilter)
+        } catch (e: Exception) {
+            // Non-fatal — next watchdog tick retries after the threshold window
+        }
     }
 
     /**
