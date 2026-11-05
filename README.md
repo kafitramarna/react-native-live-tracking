@@ -8,9 +8,11 @@ Real-time location tracking library for React Native with Firebase synchronizati
 - **Flexible Firebase Sync** — Define unlimited sync targets with custom paths, write methods, and behavior
 - **Offline-First** — Per-target offline queue with automatic sync when connection restores
 - **Battery Optimization** — Distance/Time matrix filter + Motion Sleep Mode
-- **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED)
-- **Self-Healing Service (Android)** — Engines rebuilt and resumed natively after process death or reboot — no zombie notification
-- **Remote Status Control (Android)** — Optional native RTDB listener starts/stops tracking even while the JS layer is dead
+- **Auto-Restart** — Resume tracking after device reboot (Android BOOT_COMPLETED) or process death (iOS native resume via `LiveTrackingResume`)
+- **Self-Healing Service** — Engines rebuilt and resumed natively after process death or reboot — no zombie notification
+- **Stale-Location Watchdog** — Re-requests native location updates when the OS silently pauses delivery (`LOCATION_STALE_RECOVERY`)
+- **Wake Lock (Android)** — Optional partial wake lock keeps location delivery alive while the device is idle
+- **Remote Status Control** — Optional native RTDB listener starts/stops tracking even while the JS layer is dead
 - **Cross-Platform** — iOS 13+ & Android API 21+
 - **New Architecture Ready** — Works with both TurboModules (New Arch) and legacy Bridge (Old Arch) via interop
 
@@ -256,7 +258,13 @@ firebase: {
 | `iosNotification.title` | string | — | Notification title (required when enabled) |
 | `iosNotification.text` | string | — | Notification body (required when enabled) |
 
-### Control (Android only)
+### Android
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `android.wakeLock` | boolean | `true` | Hold a partial wake lock in the foreground service for the whole tracking session, so the OS cannot suspend location delivery while the device is idle. Deep Doze can still starve non-exempted apps — see `isIgnoringBatteryOptimizations()` |
+
+### Control
 
 Optional native lifecycle control. When absent, behavior is identical to previous versions — no breaking change.
 
@@ -264,7 +272,7 @@ Optional native lifecycle control. When absent, behavior is identical to previou
 |-----------|------|---------|-------------|
 | `control.statusPath` | string | — | RTDB path watched natively (e.g. `delivery/123/status`). When omitted, derived from the first RTDB target's parent path + `/status` |
 | `control.stopValue` | number | 2 | Value that stops tracking when observed at `statusPath` |
-| `control.resumeOnRestart` | boolean | true | Resume engines after service restart/reboot. When `false`, an interrupted session is marked stopped instead of resumed |
+| `control.resumeOnRestart` | boolean | true | Resume engines after process death/restart (Android service restart/reboot; iOS cold or significant-location relaunch). When `false`, an interrupted session is marked stopped instead of resumed |
 
 ## How It Works
 
@@ -307,14 +315,27 @@ When `stopWhenStill: true` and device is stationary for > 3 minutes:
 - Base delay 1000ms, multiplier 2x, jitter ±200ms
 - Non-transient errors (permission denied) fail immediately without retry
 
-### Native Resilience (Android)
+### Native Resilience
+
+#### Android
 
 Tracking is owned by a process-wide `TrackingRuntime` singleton on the application context, decoupled from the React context:
 
 - **Self-heal after kill/reboot** — when the foreground service restarts (`START_STICKY` null intent or `BOOT_COMPLETED`), engines are rebuilt from the persisted config and tracking resumes without the JS layer. If resume is impossible (permission revoked, missing config), the service stops itself — no "zombie notification" showing a notification while tracking is dead.
+- **Wake lock** — with `android.wakeLock: true` (default) the foreground service holds a partial wake lock so the OS cannot suspend the process while tracking. This keeps fused location delivery alive during light doze; deep Doze can still starve non-exempted apps.
 - **Remote status stop** — when `control.statusPath` is set, a native `ValueEventListener` watches that RTDB path while tracking is active. When the value equals `control.stopValue`, tracking stops natively — this works even when the React context is dead. The first snapshot after arming also fires, so a stop value already written while the app was dead is still honored.
 - **Observability markers** — `getStatus()` reports `nativeWatching` (watcher armed), and one-shot `lastRestartReason` (`sticky_restart`, `boot`, `service_destroyed_while_tracking`) and `lastStopReason` (`manual`, `remote_status`, `permission_revoked`, `resume_failed`, `resume_disabled`). Each marker is cleared after the first `getStatus()` that reads it — read once at app launch for interruption reporting.
-- On iOS these fields are returned as inert values (`false`/`null`); tracking there already runs in the app process, which stays alive while background location is active.
+- **Battery optimization exemption (optional)** — `isIgnoringBatteryOptimizations()` reports whether the app is on the Doze whitelist, and `openBatteryOptimizationSettings()` opens the system screen where the user can exempt the app. Exemption is never required — tracking works without it, just less resilient in deep doze.
+
+#### iOS
+
+- **Native resume after process death** — the active session and config are persisted to `UserDefaults`. Call `LiveTrackingResume.resumeIfNeeded(launchOptions:)` from `application(_:didFinishLaunchingWithOptions:)` (see [iOS setup](#appdelegate-swift)) to rebuild engines and resume tracking natively — works for manual relaunch and significant-location relaunch (`launchOptions[.location]`), without waiting for the JS layer. Honors `control.resumeOnRestart` and records `resume_failed` / `permission_revoked` stop reasons on failure.
+- **Remote status stop** — a native `StatusWatcher` mirrors the Android RTDB listener with identical `statusPath`/`stopValue` semantics.
+- **Observability markers** — same contract as Android: `nativeWatching`, one-shot `lastRestartReason` (`location_relaunch`, `cold_start`) and `lastStopReason`.
+
+#### Stale-location watchdog (Android + iOS)
+
+While tracking is active, a watchdog ticks every `intervalMs`. If no accepted fix arrives within `max(intervalMs * 3, 30s)`, location updates are re-requested natively — no JS involvement — and a `LOCATION_STALE_RECOVERY` error event is emitted. This self-heals the common "OS silently paused delivery" failure where `getStatus().state` stays `tracking` but no locations arrive. `getStatus()` reports `lastFixAt` (wall-clock ms of last accepted fix — use this, not `lastLocation.timestamp`, for liveness checks) and `staleRecoveries`.
 
 ## Platform Setup
 
@@ -345,6 +366,8 @@ Add to `AndroidManifest.xml`:
 <!-- Network state detection for offline queue sync -->
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 ```
+
+> `WAKE_LOCK` is declared by the library's own manifest — no need to add it manually.
 
 > **Note:** You must request runtime permissions (`ACCESS_FINE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `POST_NOTIFICATIONS`) before calling `LiveTracking.start()`. The library will reject with `PERMISSION_DENIED` if required permissions are not granted.
 
@@ -382,6 +405,30 @@ Add the following keys to your `Info.plist`:
 
 Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 
+#### AppDelegate (Swift)
+
+To let a tracking session resume natively after process death — including
+relaunches triggered by significant location changes — call
+`LiveTrackingResume.resumeIfNeeded` **after** `FirebaseApp.configure()`:
+
+```swift
+import react_native_live_tracking
+
+func application(
+  _ application: UIApplication,
+  didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+) -> Bool {
+  FirebaseApp.configure()
+
+  // Resumes a persisted tracking session natively (manual relaunch and
+  // significant-location relaunch). No-op when no session was active.
+  LiveTrackingResume.resumeIfNeeded(launchOptions: launchOptions)
+
+  // ... start React Native
+  return true
+}
+```
+
 ## API Reference
 
 | Method | Returns | Description |
@@ -392,10 +439,12 @@ Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 | `getStatus()` | `Promise<TrackingStatus>` | Get current tracking status |
 | `getQueuedLocations()` | `Promise<number>` | Get total offline queue count |
 | `getQueuedLocationsByTarget()` | `Promise<Record<string, number>>` | Get queue count per target path |
+| `isIgnoringBatteryOptimizations()` | `Promise<boolean>` | Android: Doze-whitelist state. iOS: always `true` |
+| `openBatteryOptimizationSettings()` | `Promise<void>` | Android: open system battery-optimization screen. iOS: no-op |
 | `onLocationUpdate(cb)` | `Subscription` | Listen for location updates |
 | `onError(cb)` | `Subscription` | Listen for errors |
 
-`getStatus()` resolves to `TrackingStatus` with fields: `state`, `isOnline`, `queuedLocations`, `lastLocation`, `batteryOptimization`, `nativeWatching`, `lastRestartReason`, `lastStopReason` (the last two are one-shot markers — see [Native Resilience](#native-resilience-android)).
+`getStatus()` resolves to `TrackingStatus` with fields: `state`, `isOnline`, `queuedLocations`, `lastLocation`, `batteryOptimization`, `batteryOptimizationExempt` (Android), `wakeLock` (Android), `nativeWatching`, `lastFixAt`, `staleRecoveries`, `lastRestartReason`, `lastStopReason` (the last two are one-shot markers — see [Native Resilience](#native-resilience)).
 
 ## Error Codes
 
@@ -411,6 +460,7 @@ Ensure your app has `GoogleService-Info.plist` added to the Xcode project.
 | `DEPRECATED_FIELD` | Using old config fields (currentLocationPath/historyPath) |
 | `QUEUE_OVERFLOW` | Offline queue reached 10,000 cap (oldest evicted) |
 | `LOCATION_UNKNOWN` | Location temporarily unavailable |
+| `LOCATION_STALE_RECOVERY` | No fix arrived within the stale threshold — native watchdog re-requested location updates (informational, self-healing) |
 | `NETWORK_ERROR` | Location network error |
 | `LOCATION_ERROR` | Generic location update failure |
 
